@@ -1,0 +1,18 @@
+# Credentials and local configuration
+版本管理.txt
+版本控制.txt
+.env
+.env.*
+!.env.example
+
+# Unrelated local asset-generation runs
+runs/
+docs/superpowers/specs/2026-08-10-jiu-hu-v2-design.md
+
+# Common local artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+Thumbs.db
