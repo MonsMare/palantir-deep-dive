@@ -9,6 +9,9 @@
 runs/
 docs/superpowers/specs/2026-08-10-jiu-hu-v2-design.md
 
+# Local tool state
+.reasonix/
+
 # Common local artifacts
 __pycache__/
 *.py[cod]
