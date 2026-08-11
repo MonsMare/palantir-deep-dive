@@ -24,6 +24,8 @@
 ## AI FDE 项目设计
 
 - [AI FDE 工程结构复刻项目：需求与系统设计](../docs/superpowers/specs/2026-08-10-ai-fde-engineering-requirements-design.md)：本地/私有资料与 Git 优先的自用 MVP 需求、架构、Agent、工具、数据产品、Ontology、模型、评估和交付规范。
+- [AI FDE Builder 平台设计规格](../docs/superpowers/specs/2026-08-11-ai-fde-builder-design.md)：受门禁控制的工程控制平面、Agent 编排、证据、Artifact、交互界面、三循环和交付治理。
+- [软件研发需求对齐与工期预测样板项目](../docs/superpowers/specs/2026-08-11-software-requirements-alignment-delivery-forecasting-design.md)：用于体验需求对齐、需求追加影响分析、工期预测、计划优化、Mock Action 和反馈闭环的垂直 Ontology 项目。
 
 ## 一句话结论
 
