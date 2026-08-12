@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from copy import deepcopy
+from typing import Any, Literal, Mapping, Self
 
 from pydantic import (
     BaseModel,
@@ -38,6 +39,17 @@ class ActionRequest(BaseModel):
     audit_ref: str
     audit_actor: str
     outcome_status: Literal["pending", "succeeded", "failed"] = "pending"
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        """Copy an action request through full governance validation."""
+        values = self.model_dump(mode="python")
+        if deep:
+            values = deepcopy(values)
+        if update:
+            values.update(update)
+        return type(self).model_validate(values)
 
     @field_validator(
         "action_id",

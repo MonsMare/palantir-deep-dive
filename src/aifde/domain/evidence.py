@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Mapping, Self
 
 from pydantic import (
     BaseModel,
@@ -41,6 +42,17 @@ class Claim(BaseModel):
     required_evidence: StrictBool = False
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     validation_status: str = "pending"
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        """Copy a claim through full domain-contract validation."""
+        values = self.model_dump(mode="python")
+        if deep:
+            values = deepcopy(values)
+        if update:
+            values.update(update)
+        return type(self).model_validate(values)
 
     @model_validator(mode="before")
     @classmethod

@@ -82,6 +82,19 @@ def test_artifact_rejects_non_finite_json_numbers(value):
         )
 
 
+@pytest.mark.parametrize("value", [nan, inf, -inf])
+def test_artifact_copy_rejects_non_finite_json_numbers(value):
+    artifact = Artifact.build(
+        project_id="p1",
+        kind="DecisionContract",
+        content={"value": 1},
+        owner="owner-1",
+    )
+
+    with pytest.raises(ValidationError):
+        artifact.model_copy(update={"content": {"value": value}})
+
+
 def test_claim_rejects_unknown_claim_type():
     with pytest.raises(ValidationError):
         Claim(
@@ -127,6 +140,20 @@ def test_critical_claim_rejects_blank_evidence_reference():
             evidence_refs=["  "],
             text="blank evidence reference",
         )
+
+
+def test_critical_claim_copy_cannot_remove_required_evidence():
+    claim = Claim(
+        claim_id="c1",
+        artifact_id="a1",
+        claim_type="fact",
+        criticality="critical",
+        evidence_refs=["e1"],
+        text="supported fact",
+    )
+
+    with pytest.raises(ValidationError):
+        claim.model_copy(update={"evidence_refs": []})
 
 
 def valid_action_request_kwargs():
@@ -206,6 +233,20 @@ def test_action_request_rejects_builder_self_approval():
 
     with pytest.raises(ValidationError):
         ActionRequest(**values)
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"execution_mode": "real"},
+        {"approval_actor": "builder-1"},
+    ],
+)
+def test_action_request_copy_revalidates_governance_constraints(update):
+    request = ActionRequest(**valid_action_request_kwargs())
+
+    with pytest.raises(ValidationError):
+        request.model_copy(update=update)
 
 
 def test_stage_state_has_blocked_state():

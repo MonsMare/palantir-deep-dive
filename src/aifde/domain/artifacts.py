@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import json
-from typing import Any
+from typing import Any, Mapping, Self
 from uuid import uuid4
 
 from pydantic import (
@@ -60,11 +61,19 @@ class Artifact(BaseModel):
         """Derive the hash from current content so it cannot become stale."""
         return content_hash_for(self.content)
 
-    def model_copy(self, *, update: dict[str, Any] | None = None, **kwargs: Any) -> Artifact:
-        """Copy an artifact without permitting a forged derived hash."""
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        """Copy an artifact through validation without permitting a forged hash."""
         if update and "content_hash" in update:
             raise ValueError("content_hash is a derived field and cannot be updated")
-        return super().model_copy(update=update, **kwargs)
+
+        values = self.model_dump(mode="python", exclude={"content_hash"})
+        if deep:
+            values = deepcopy(values)
+        if update:
+            values.update(update)
+        return type(self).model_validate(values)
 
     @model_validator(mode="before")
     @classmethod
