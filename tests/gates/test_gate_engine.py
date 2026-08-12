@@ -148,6 +148,35 @@ def test_soft_gate_requires_complete_non_expired_waiver(
     assert summary.pending_approvals == []
 
 
+@pytest.mark.parametrize("gate_result", [GateResult.PENDING, GateResult.BLOCKED])
+def test_required_soft_pending_or_blocked_cannot_be_waived(
+    gate_engine: GateEngine, stage_run: StageRun, gate_result: GateResult
+):
+    """A waiver can cover only a current soft FAILED result, never an incomplete result."""
+    register_required_passes(gate_engine, stage_run)
+    context = validation_context(stage_run)
+    gate_engine.register_result(
+        stage_run.stage_run_id,
+        gate_id="business.exception_coverage",
+        result=validation_result(passed=False),
+        context=context,
+        gate_result=gate_result,
+    )
+    gate_engine.add_waiver(
+        stage_run.stage_run_id,
+        gate_id="business.exception_coverage",
+        owner="domain-owner",
+        reason="fixture is still being validated",
+        remediation="complete the pending validation",
+        expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+    )
+
+    decision = gate_engine.can_transition(stage_run.stage_run_id, StageState.APPROVED)
+
+    assert decision.allowed is False
+    assert "business.exception_coverage" in decision.blocking_gate_ids
+
+
 def test_builder_cannot_approve_own_stage(gate_engine: GateEngine, stage_run: StageRun):
     """Removing actor separation would let a builder self-approve a stage."""
     register_required_passes(gate_engine, stage_run)
@@ -165,7 +194,7 @@ def test_transition_is_typed_audited_and_uses_the_only_path(
     register_required_passes(gate_engine, stage_run)
 
     transition = gate_engine.transition(
-        stage_run.stage_run_id, StageState.APPROVED, actor="domain-owner"
+        stage_run.stage_run_id, StageState.APPROVED, actor=" domain-owner "
     )
 
     assert transition.stage_run_id == stage_run.stage_run_id
@@ -269,22 +298,33 @@ def test_register_result_requires_complete_stage_input_snapshot(
         )
 
 
-def test_stage_registration_keeps_existing_callers_compatible_without_registered_context(
+def test_stage_registration_requires_authoritative_validation_context(
     stage_run: StageRun,
 ):
-    """Requiring a registered context would break callers that provide context at result time."""
+    """Stage registration must establish an authoritative validation context."""
     engine = GateEngine()
-    engine.register_stage_run(stage_run, builder_actor="builder-1")
+    with pytest.raises(TypeError, match="validation_context"):
+        engine.register_stage_run(
+            stage_run,
+            builder_actor="builder-1",
+            validation_context=None,
+        )
 
-    gate_run = engine.register_result(
-        stage_run.stage_run_id,
-        gate_id="evidence.coverage",
-        result=validation_result(passed=True),
-        context=validation_context(stage_run),
-    )
 
-    assert gate_run.configuration == {"threshold": 0.95}
-    assert gate_run.evidence_snapshot_hash == "snapshot-hash-1"
+def test_register_result_rejects_mixed_stage_validation_contexts(
+    gate_engine: GateEngine, stage_run: StageRun
+):
+    """Every GateRun for a stage must use its registered authoritative context."""
+    with pytest.raises(ValueError, match="registered input snapshot"):
+        gate_engine.register_result(
+            stage_run.stage_run_id,
+            gate_id="evidence.coverage",
+            result=validation_result(passed=True),
+            context=validation_context(
+                stage_run,
+                configuration={"threshold": 0.99},
+            ),
+        )
 
 
 def test_engine_defensively_copies_returned_gate_and_transition_records(
@@ -318,7 +358,11 @@ def test_stage_registration_and_transition_reject_untyped_or_blank_identities(
     """Removing runtime type and identity checks would permit unsafe state mutation."""
     engine = GateEngine()
     with pytest.raises(ValueError, match="builder_actor"):
-        engine.register_stage_run(stage_run, builder_actor=None)
+        engine.register_stage_run(
+            stage_run,
+            builder_actor=None,
+            validation_context=validation_context(stage_run),
+        )
 
     engine.register_stage_run(
         stage_run,
@@ -358,3 +402,58 @@ def test_release_candidate_and_release_require_release_governance_gate(
     )
 
     assert gate_engine.can_transition(stage_run.stage_run_id, StageState.RELEASED).allowed is True
+
+
+def test_builder_cannot_execute_release_transitions(
+    gate_engine: GateEngine, stage_run: StageRun
+):
+    """Builder identity is forbidden for both release-candidate and released states."""
+    register_required_passes(gate_engine, stage_run)
+    gate_engine.transition(stage_run.stage_run_id, StageState.APPROVED, actor="domain-owner")
+    gate_engine.register_result(
+        stage_run.stage_run_id,
+        gate_id="release.governance",
+        result=validation_result(passed=True),
+        context=validation_context(stage_run),
+    )
+
+    with pytest.raises(PermissionError, match="builder cannot approve or release"):
+        gate_engine.transition(
+            stage_run.stage_run_id,
+            StageState.RELEASE_CANDIDATE,
+            actor="builder-1",
+        )
+
+    gate_engine.transition(
+        stage_run.stage_run_id,
+        StageState.RELEASE_CANDIDATE,
+        actor="release-owner",
+    )
+    with pytest.raises(PermissionError, match="builder cannot approve or release"):
+        gate_engine.transition(
+            stage_run.stage_run_id,
+            StageState.RELEASED,
+            actor="builder-1",
+        )
+
+
+def test_padded_actor_is_canonicalized_before_self_approval_check(
+    stage_run: StageRun,
+):
+    """Whitespace variants of one identity cannot bypass builder separation."""
+    engine = GateEngine()
+    engine.register_stage_run(
+        stage_run,
+        builder_actor="builder-1",
+        validation_context=validation_context(stage_run),
+    )
+    register_required_passes(engine, stage_run)
+
+    with pytest.raises(PermissionError, match="builder cannot approve or release"):
+        engine.transition(
+            stage_run.stage_run_id,
+            StageState.APPROVED,
+            actor=" builder-1 ",
+        )
+
+    assert engine.list_transitions(stage_run.stage_run_id) == []

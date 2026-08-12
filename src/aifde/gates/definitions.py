@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
+
+from aifde.domain.artifacts import canonical_json_bytes
 
 
 class GateDefinition(BaseModel):
     """Governance policy for one named validation gate."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="allow", frozen=True)
 
     gate_id: str
     category: Literal[
@@ -33,6 +36,13 @@ class GateDefinition(BaseModel):
         if not value.strip():
             raise ValueError("must not be empty")
         return value
+
+    @property
+    def definition_fingerprint(self) -> str:
+        """Hash every canonical policy field, including fields added in the future."""
+        return sha256(
+            canonical_json_bytes(self.model_dump(mode="json"))
+        ).hexdigest()
 
 
 BUILT_IN_GATE_DEFINITIONS: tuple[GateDefinition, ...] = (

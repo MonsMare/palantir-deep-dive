@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
 from aifde.domain.stages import StageRun, StageState
 from aifde.gates.definitions import GateDefinition
 from aifde.gates.engine import GateEngine
@@ -90,6 +94,57 @@ def test_gate_definition_version_change_invalidates_old_gate_result():
     assert engine.can_transition("run-1", StageState.APPROVED).allowed is False
 
 
+def test_same_version_definition_content_change_invalidates_old_gate_result():
+    """Changing policy content must stale results even when version labels are reused."""
+    engine = _engine_with_completed_gate()
+    definition = engine.get_definition("evidence.coverage")
+    context = ValidationContext(
+        stage_run_id="run-1",
+        artifact_ids=["artifact-1"],
+        evidence_snapshot_id="snapshot-1",
+        evidence_snapshot_hash="snapshot-hash-1",
+        configuration={"threshold": 0.95},
+    )
+    engine.register_result(
+        "run-1",
+        gate_id="evidence.coverage",
+        result=ValidationResult(
+            passed=False,
+            evidence_refs=["snapshot-1"],
+            validator_version=definition.validator_version,
+            input_hashes={"artifact-1": "artifact-hash-1"},
+        ),
+        context=context,
+    )
+
+    engine.register_definition(definition.model_copy(update={"severity": "soft"}))
+    engine.add_waiver(
+        "run-1",
+        gate_id="evidence.coverage",
+        owner="domain-owner",
+        reason="temporary exception",
+        remediation="restore the hard policy and rerun validation",
+        expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+    )
+
+    decision = engine.can_transition("run-1", StageState.APPROVED)
+
+    assert decision.allowed is False
+    assert "evidence.coverage" in decision.blocking_gate_ids
+
+
+def test_future_definition_field_change_invalidates_old_gate_result():
+    """Fingerprinting must include policy fields introduced after this model version."""
+    engine = _engine_with_completed_gate()
+    definition = engine.get_definition("evidence.coverage")
+
+    engine.register_definition(
+        definition.model_copy(update={"future_policy": {"requires_owner": True}})
+    )
+
+    assert engine.can_transition("run-1", StageState.APPROVED).allowed is False
+
+
 def test_validator_version_change_invalidates_old_gate_result():
     """Ignoring validator versions would treat earlier validator output as current."""
     engine = _engine_with_completed_gate()
@@ -116,3 +171,24 @@ def test_configuration_change_invalidates_old_gate_result():
     ) == len(APPROVAL_GATES)
 
     assert engine.can_transition("run-1", StageState.APPROVED).allowed is False
+
+
+def test_same_evidence_snapshot_id_without_new_hash_is_rejected():
+    """Reusing an evidence id without content identity cannot silently preserve results."""
+    engine = _engine_with_completed_gate()
+
+    with pytest.raises(ValueError, match="hash"):
+        engine.invalidate_for_evidence_snapshot_change("snapshot-1", "snapshot-1")
+
+
+def test_same_evidence_snapshot_id_and_hash_keeps_current_gate_results():
+    """An unchanged evidence identity and content hash must not create false staleness."""
+    engine = _engine_with_completed_gate()
+
+    assert (
+        engine.invalidate_for_evidence_snapshot_change(
+            "snapshot-1", "snapshot-1", "snapshot-hash-1"
+        )
+        == 0
+    )
+    assert engine.can_transition("run-1", StageState.APPROVED).allowed is True

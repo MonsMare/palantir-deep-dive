@@ -1,50 +1,59 @@
-# Task 3 修复实现报告：Gate Engine 与阶段状态机
+# Task 3 最终修复实现报告：Gate Engine 与阶段状态机
 
 ## 范围
 
-- 只修改 Task 3 范围内的 `src/aifde/gates/`、`tests/gates/`，以及本实现报告。
-- 未实现后续 Tool / Action / Orchestration，也未修改计划、ledger 或其他任务文件。
+- 只修改 `src/aifde/gates/`、`tests/gates/` 与本报告。
+- 未实现后续 Tool / Action / Orchestration，也未修改计划、ledger 或 Task 4+ 文件。
 
-## 已关闭的 5 个审查问题
+## 六项修复
 
-1. Required gate policy
-   - `APPROVED` 必须具备七个 approval gates 的 current acceptable 结果。
-   - `RELEASE_CANDIDATE` / `RELEASED` 额外要求 `release.governance`。
-   - missing、partial、pending waiver、stale、hard failed 都进入 `blocking_gate_ids`，空结果不再放行。
+1. **C1-R：required soft gate 状态**
+   - `PENDING` / `BLOCKED` 永远进入阻塞路径；active waiver 只豁免 current soft `FAILED`。
+   - required gate 的 missing、stale、hard failure、pending/block 状态都会出现在 `blocking_gate_ids`。
+   - `register_result()` 支持显式 `gate_result`，保留原有 `passed` 默认映射。
 
-2. 输入快照闭合
-   - `ValidationContext.artifact_ids` 必须与 StageRun input + output artifacts 一一覆盖。
-   - `ValidationResult.input_hashes` 必须与 context artifacts 一一覆盖且非空。
-   - GateRun 记录 artifact hashes、evidence snapshot id/hash、configuration、configuration hash、input snapshot hash。
-   - 新增 configuration invalidation；definition / validator version、artifact、evidence 变化都会使旧 GateRun stale。
-   - `evidence_snapshot_hash` 为可选字段，用于增强快照绑定，同时保持 brief 中原有 `ValidationContext` 接口兼容。
+2. **C2-R：完整 definition fingerprint**
+   - `GateDefinition` 使用 canonical JSON 对全部定义字段（包括允许的未来字段）计算 `definition_fingerprint`。
+   - `register_definition()` 以 fingerprint 比较策略内容；同 version / validator_version 的内容变化也会使旧 GateRun stale。
+   - GateRun 保存 definition fingerprint，并在 currentness 判断中再次核对。
 
-3. 防御性 copy / 嵌套可变对象隔离
-   - definition、stage run、GateRun、waiver、transition 对外返回均经重新验证的深拷贝。
-   - 外部对返回对象的 nested dict/list 做 `clear()` / mutation 不会修改内部审计与 invalidation 状态。
+3. **C3-R：builder 不得 approval/release**
+   - builder 对 `APPROVED`、`RELEASE_CANDIDATE`、`RELEASED` 均被拒绝。
+   - builder 与 transition actor 都在边界统一 `strip()` canonicalize；审计记录保存 canonical actor。
 
-4. 身份与 typed state 边界
-   - `builder_actor` 必填非空。
-   - `actor` 必填非空。
-   - `can_transition` / `transition` 运行时拒绝非 `StageState` target。
-   - 内部 StageRun state 更新通过 `StageRun.model_validate`，避免未经验证的 `model_copy(update=...)`。
+4. **I1-R：evidence snapshot hash 闭合**
+   - `ValidationContext.evidence_snapshot_hash` 改为必填非空字段。
+   - 同 evidence ID 更新若未提供新 hash 会抛出 `ValueError`；ID/hash 同时不变返回 0，hash 变化会 stale。
+   - stage registration 保存完整 authoritative context。
 
-5. 未越界
-   - 未添加 Tool Gateway、ActionBroker、orchestration 或持久化 repository 的后续任务实现。
+5. **I2-R：stage authoritative context**
+   - `register_stage_run()` 强制要求完整 `ValidationContext`，不再接受 `None`。
+   - `register_result()` 只接受与注册 context 严格相等的 context，禁止同一 stage 的 GateRun 混用配置、证据或其他快照。
 
-## 测试与验证
+6. **I3-R：canonical actor identity**
+   - `builder_actor` 和 transition `actor` 都要求非空并保存 stripped canonical 值。
+   - padded actor 与 builder identity 被视为同一身份，不能绕过 self-approval/self-release 检查。
 
-- `pytest tests/gates/test_gate_engine.py tests/gates/test_gate_invalidation.py -q`
-  - `15 passed in 0.20s`
-- `pytest -q`
-  - `56 passed in 1.85s`
-- `python -m compileall -q src tests`
-  - exit 0，无输出
-- `git diff --check`
-  - exit 0；仅 Git 报告工作区文件未来可能 LF→CRLF 的提示，无 whitespace error
+## 回归覆盖
 
-## 风险 / 后续集成边界
+- soft `PENDING` + active waiver
+- soft `BLOCKED` + active waiver
+- same-version definition policy content change
+- future definition field change
+- builder release-candidate/released transition
+- same evidence ID without hash raises
+- same evidence ID and same hash does not stale
+- mixed validation contexts rejected
+- padded actor rejected
 
-- GateRun、waiver、transition 仍为 GateEngine 内存存储；后续 SQLite repository contract 应由对应任务接入，避免越界修改 Task 2。
-- `register_stage_run` 现在强制 `builder_actor`，但 `validation_context` 保持可选；如果调用方在注册时不提供 context，则必须在 `register_result` 时提供完整闭合 context。
-- Release governance gate 只在 release candidate / released target policy 中强制；实际 validator 执行调度仍属于后续 orchestration 范围。
+## 验证结果
+
+- `pytest tests/gates/test_gate_engine.py tests/gates/test_gate_invalidation.py -q`：**24 passed**
+- `pytest -q`：**65 passed**
+- `python -m compileall -q src tests`：**exit 0**
+- `git diff --check`：**exit 0**
+
+## 模型状态
+
+- 用户偏好：`gpt-5.6-luna + max`。
+- 模型回退：**未发生可检测的容量拒绝**；当前平台未提供模型切换接口，本次使用会话可用的最高推理强度继续执行。

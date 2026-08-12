@@ -29,9 +29,10 @@ class GateRun(BaseModel):
     result: GateResult
     definition_version: str
     validator_version: str
+    definition_fingerprint: str
     artifact_hashes: dict[str, str]
     evidence_snapshot_id: str
-    evidence_snapshot_hash: str | None = None
+    evidence_snapshot_hash: str
     configuration: dict[str, JsonValue]
     configuration_hash: str
     input_snapshot_hash: str
@@ -157,10 +158,7 @@ class GateEngine:
         stored = _copy_model(definition)
         prior = self._definitions.get(stored.gate_id)
         self._definitions[stored.gate_id] = stored
-        if prior is not None and (
-            prior.version != stored.version
-            or prior.validator_version != stored.validator_version
-        ):
+        if prior is not None and prior.definition_fingerprint != stored.definition_fingerprint:
             self._mark_gate_stale(stored.gate_id)
         return _copy_model(stored)
 
@@ -176,20 +174,18 @@ class GateEngine:
         stage_run: StageRun,
         *,
         builder_actor: str,
-        validation_context: ValidationContext | None = None,
+        validation_context: ValidationContext,
     ) -> StageRun:
         """Register the stage and its authoritative validation input snapshot."""
         if not isinstance(stage_run, StageRun):
             raise TypeError("stage_run must be a StageRun")
-        _require_identity(builder_actor, "builder_actor")
+        builder_actor = _canonicalize_identity(builder_actor, "builder_actor")
         if stage_run.stage_run_id in self._stage_runs:
             raise ValueError("stage run is already registered")
-        if validation_context is not None:
-            self._validate_context_for_stage(stage_run, validation_context)
+        self._validate_context_for_stage(stage_run, validation_context)
         self._stage_runs[stage_run.stage_run_id] = _copy_model(stage_run)
         self._builder_actors[stage_run.stage_run_id] = builder_actor
-        if validation_context is not None:
-            self._validation_contexts[stage_run.stage_run_id] = _copy_model(validation_context)
+        self._validation_contexts[stage_run.stage_run_id] = _copy_model(validation_context)
         self._gate_runs[stage_run.stage_run_id] = []
         self._waivers[stage_run.stage_run_id] = []
         return self.get_stage_run(stage_run.stage_run_id)
@@ -208,6 +204,7 @@ class GateEngine:
         gate_id: str,
         result: ValidationResult,
         context: ValidationContext,
+        gate_result: GateResult | None = None,
     ) -> GateRun:
         """Store a result only when it exactly matches the registered input snapshot."""
         self.get_stage_run(stage_run_id)
@@ -226,13 +223,15 @@ class GateEngine:
             raise ValueError("input_hashes must exactly cover validation context artifact_ids")
         if context.evidence_snapshot_id not in result.evidence_refs:
             raise ValueError("result must reference the validation evidence snapshot")
+        resolved_gate_result = _resolve_gate_result(result, gate_result)
         gate_run = GateRun(
             gate_run_id=str(uuid4()),
             stage_run_id=stage_run_id,
             gate_id=gate_id,
-            result=GateResult.PASSED if result.passed else GateResult.FAILED,
+            result=resolved_gate_result,
             definition_version=definition.version,
             validator_version=result.validator_version,
+            definition_fingerprint=definition.definition_fingerprint,
             artifact_hashes=deepcopy(result.input_hashes),
             evidence_snapshot_id=context.evidence_snapshot_id,
             evidence_snapshot_hash=context.evidence_snapshot_hash,
@@ -289,7 +288,17 @@ class GateEngine:
             if gate_run.result is GateResult.PASSED and self._is_current(gate_run):
                 continue
             definition = self._get_stored_definition(gate_run.gate_id)
-            if definition.severity == "hard" or not self._is_current(gate_run):
+            if not self._is_current(gate_run):
+                hard_failures.append(gate_run.gate_id)
+                continue
+            if gate_run.result in {GateResult.PENDING, GateResult.BLOCKED}:
+                if definition.severity == "hard":
+                    hard_failures.append(gate_run.gate_id)
+                else:
+                    soft_failures.append(gate_run.gate_id)
+                    pending_approvals.append(gate_run.gate_id)
+                continue
+            if definition.severity == "hard":
                 hard_failures.append(gate_run.gate_id)
                 continue
             soft_failures.append(gate_run.gate_id)
@@ -340,9 +349,13 @@ class GateEngine:
         """Perform the only validated and audited state mutation."""
         if not isinstance(target, StageState):
             raise TypeError("target must be a StageState")
-        _require_identity(actor, "actor")
-        if target is StageState.APPROVED and actor == self._builder_actors[stage_run_id]:
-            raise PermissionError("builder cannot approve their own stage")
+        actor = _canonicalize_identity(actor, "actor")
+        if target in {
+            StageState.APPROVED,
+            StageState.RELEASE_CANDIDATE,
+            StageState.RELEASED,
+        } and actor == self._builder_actors[stage_run_id]:
+            raise PermissionError("builder cannot approve or release their own stage")
         decision = self.can_transition(stage_run_id, target)
         if not decision.allowed:
             raise TransitionBlocked(f"transition not allowed: {decision.reason}")
@@ -389,6 +402,8 @@ class GateEngine:
         """Stale results when an evidence snapshot id or its content hash changes."""
         _require_identity(evidence_snapshot_id, "evidence_snapshot_id")
         _require_identity(new_snapshot_id, "new_snapshot_id")
+        if evidence_snapshot_id == new_snapshot_id and new_snapshot_hash is None:
+            raise ValueError("new_snapshot_hash is required when reusing an evidence snapshot id")
         if new_snapshot_hash is not None:
             _require_identity(new_snapshot_hash, "new_snapshot_hash")
         return self._invalidate(
@@ -448,6 +463,7 @@ class GateEngine:
             not gate_run.stale
             and gate_run.definition_version == definition.version
             and gate_run.validator_version == definition.validator_version
+            and gate_run.definition_fingerprint == definition.definition_fingerprint
         )
 
     def _mark_gate_stale(self, gate_id: str) -> None:
@@ -493,9 +509,28 @@ def _unique(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
 
 
-def _require_identity(value: str, name: str) -> None:
+def _canonicalize_identity(value: str, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be a non-empty identity")
+    return value.strip()
+
+
+def _require_identity(value: str, name: str) -> None:
+    _canonicalize_identity(value, name)
+
+
+def _resolve_gate_result(
+    result: ValidationResult, gate_result: GateResult | None
+) -> GateResult:
+    """Resolve an explicit lifecycle result while preserving the boolean API."""
+    resolved = gate_result or (GateResult.PASSED if result.passed else GateResult.FAILED)
+    if not isinstance(resolved, GateResult):
+        raise TypeError("gate_result must be a GateResult")
+    if resolved is GateResult.PASSED and not result.passed:
+        raise ValueError("a PASSED gate result must have passed=True")
+    if resolved is not GateResult.PASSED and result.passed:
+        raise ValueError("a non-PASSED gate result must have passed=False")
+    return resolved
 
 
 def _utc_now() -> datetime:

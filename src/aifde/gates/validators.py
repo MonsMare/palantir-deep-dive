@@ -18,7 +18,7 @@ class ValidationContext(BaseModel):
     stage_run_id: str
     artifact_ids: list[str] = Field(default_factory=list)
     evidence_snapshot_id: str
-    evidence_snapshot_hash: str | None = None
+    evidence_snapshot_hash: str
     configuration: dict[str, JsonValue] = Field(default_factory=dict)
 
     @field_validator("stage_run_id", "evidence_snapshot_id")
@@ -30,8 +30,8 @@ class ValidationContext(BaseModel):
 
     @field_validator("evidence_snapshot_hash")
     @classmethod
-    def reject_blank_optional_hash(cls, value: str | None) -> str | None:
-        if value is not None and not value.strip():
+    def reject_blank_evidence_hash(cls, value: str) -> str:
+        if not value.strip():
             raise ValueError("must not be empty")
         return value
 
