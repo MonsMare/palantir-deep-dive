@@ -30,6 +30,41 @@ def test_artifact_hash_is_stable_for_same_content():
     assert first.content_hash == second.content_hash
 
 
+def test_artifact_uses_strict_three_part_semantic_versions():
+    artifact = Artifact.build(
+        project_id="p1",
+        kind="DecisionContract",
+        content={"decision": "accept_change"},
+        owner="owner-1",
+    )
+
+    assert artifact.version == "1.0.0"
+    assert Artifact.build(
+        project_id="p1",
+        kind="DecisionContract",
+        content={"decision": "accept_change"},
+        owner="owner-1",
+        version="2.10.3",
+    ).version == "2.10.3"
+    assert Artifact.build(
+        project_id="p1",
+        kind="DecisionContract",
+        content={"decision": "accept_change"},
+        owner="owner-1",
+        version=2,
+    ).version == "2.0.0"
+
+    for invalid_version in ("2", "2.1", "02.1.0", "1.0.0-dev", "1.0.0.1"):
+        with pytest.raises(ValidationError):
+            Artifact.build(
+                project_id="p1",
+                kind="DecisionContract",
+                content={"decision": "accept_change"},
+                owner="owner-1",
+                version=invalid_version,
+            )
+
+
 def test_artifact_rejects_forged_content_hash():
     with pytest.raises(ValidationError):
         Artifact(

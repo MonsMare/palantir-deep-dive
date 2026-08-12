@@ -10,7 +10,12 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Callable, Iterator, TypeVar
 
-from aifde.domain.artifacts import Artifact, canonical_json_bytes
+from aifde.domain.artifacts import (
+    Artifact,
+    canonical_json_bytes,
+    normalize_semantic_version,
+    semantic_version_key,
+)
 from aifde.domain.evidence import Evidence
 
 
@@ -33,6 +38,7 @@ class SQLiteRegistry:
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._closed = False
+        self._active_transaction: _SQLiteRegistryTransaction | None = None
         self._initialize_schema()
         self.artifacts = _SQLiteArtifactRepository(self)
         self.evidence = _SQLiteEvidenceRepository(self)
@@ -45,7 +51,9 @@ class SQLiteRegistry:
     def close(self) -> None:
         """Close the underlying database connection; repeated calls are safe."""
         if not self._closed:
-            if self._connection.in_transaction:
+            if self._active_transaction is not None:
+                self._active_transaction.rollback()
+            elif self._connection.in_transaction:
                 self._connection.rollback()
             self._connection.close()
             self._closed = True
@@ -53,17 +61,27 @@ class SQLiteRegistry:
     def transaction(self) -> _SQLiteRegistryTransaction:
         """Begin an explicit transaction for atomic multi-repository writes."""
         self._ensure_open()
-        if self._connection.in_transaction:
+        if self._active_transaction is not None or self._connection.in_transaction:
             raise RuntimeError("a registry transaction is already active")
         self._connection.execute("BEGIN IMMEDIATE")
-        return _SQLiteRegistryTransaction(self)
+        transaction = _SQLiteRegistryTransaction(self)
+        self._active_transaction = transaction
+        return transaction
 
     @contextmanager
     def _write_transaction(self) -> Iterator[None]:
         self._ensure_open()
-        if self._connection.in_transaction:
-            yield
+        active_transaction = self._active_transaction
+        if active_transaction is not None:
+            active_transaction._ensure_active()
+            try:
+                yield
+            except BaseException:
+                active_transaction._abort()
+                raise
             return
+        if self._connection.in_transaction:
+            raise RuntimeError("registry has an unmanaged active transaction")
         self._connection.execute("BEGIN IMMEDIATE")
         try:
             yield
@@ -94,7 +112,7 @@ class SQLiteRegistry:
             CREATE TABLE IF NOT EXISTS artifact_versions (
                 project_id TEXT NOT NULL,
                 artifact_id TEXT NOT NULL,
-                version INTEGER NOT NULL CHECK (version >= 1),
+                version TEXT NOT NULL,
                 kind TEXT NOT NULL,
                 status TEXT NOT NULL,
                 owner TEXT NOT NULL,
@@ -162,25 +180,67 @@ class _SQLiteRegistryTransaction:
     def __init__(self, registry: SQLiteRegistry) -> None:
         self._registry = registry
         self._complete = False
-        self.artifacts = _SQLiteArtifactRepository(registry)
-        self.evidence = _SQLiteEvidenceRepository(registry)
+        self._aborted = False
+        self.artifacts = _SQLiteArtifactRepository(registry, self)
+        self.evidence = _SQLiteEvidenceRepository(registry, self)
+
+    def __enter__(self) -> _SQLiteRegistryTransaction:
+        self._ensure_active()
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> bool:
+        if not self._complete:
+            self.rollback()
+        return False
 
     def commit(self) -> None:
         """Commit once; a failed transaction must be discarded by the caller."""
+        if self._aborted:
+            raise RuntimeError("registry transaction is aborted")
         if self._complete:
             raise RuntimeError("registry transaction is already complete")
-        if not self._registry.connection.in_transaction:
-            raise RuntimeError("registry transaction is no longer active")
+        self._ensure_active()
         self._registry.connection.commit()
         self._complete = True
+        self._registry._active_transaction = None
+
+    def rollback(self) -> None:
+        """Discard all writes and make this transaction unusable."""
+        self._abort()
+
+    def _ensure_active(self) -> None:
+        if self._aborted:
+            raise RuntimeError("registry transaction is aborted")
+        if self._complete or self._registry._active_transaction is not self:
+            raise RuntimeError("registry transaction is no longer active")
+        if not self._registry.connection.in_transaction:
+            raise RuntimeError("registry transaction is no longer active")
+
+    def _abort(self) -> None:
+        if self._complete:
+            return
+        if self._registry.connection.in_transaction:
+            self._registry.connection.rollback()
+        self._aborted = True
+        self._complete = True
+        if self._registry._active_transaction is self:
+            self._registry._active_transaction = None
 
 
 class _SQLiteArtifactRepository:
-    def __init__(self, registry: SQLiteRegistry) -> None:
+    def __init__(
+        self,
+        registry: SQLiteRegistry,
+        transaction: _SQLiteRegistryTransaction | None = None,
+    ) -> None:
         self._registry = registry
+        self._transaction = transaction
 
     def put(self, artifact: Artifact) -> Artifact:
         """Insert a new version and reject all attempts to replace a version."""
+        if self._transaction is not None:
+            self._transaction._ensure_active()
+
         def insert() -> Artifact:
             connection = self._registry.connection
             existing = connection.execute(
@@ -195,14 +255,18 @@ class _SQLiteArtifactRepository:
             elif existing["kind"] != artifact.kind:
                 raise ValueError("artifact identity is immutable")
 
-            latest = connection.execute(
+            version_rows = connection.execute(
                 """
-                SELECT MAX(version) AS version FROM artifact_versions
+                SELECT version FROM artifact_versions
                 WHERE project_id = ? AND artifact_id = ?
                 """,
                 (artifact.project_id, artifact.artifact_id),
-            ).fetchone()["version"]
-            if latest is not None and artifact.version <= latest:
+            ).fetchall()
+            if any(row["version"] == artifact.version for row in version_rows):
+                raise ValueError("artifact versions are immutable and append-only")
+            if version_rows and semantic_version_key(artifact.version) <= max(
+                semantic_version_key(str(row["version"])) for row in version_rows
+            ):
                 raise ValueError("artifact versions are immutable and append-only")
 
             try:
@@ -235,19 +299,21 @@ class _SQLiteArtifactRepository:
         return self._registry._write(insert)
 
     def get(
-        self, project_id: str, artifact_id: str, version: int | None = None
+        self, project_id: str, artifact_id: str, version: str | None = None
     ) -> Artifact:
         query = """
             SELECT * FROM artifact_versions
             WHERE project_id = ? AND artifact_id = ?
         """
         parameters: tuple[Any, ...] = (project_id, artifact_id)
-        if version is None:
-            query += " ORDER BY version DESC LIMIT 1"
-        else:
+        if version is not None:
+            version = normalize_semantic_version(version)
             query += " AND version = ?"
             parameters += (version,)
-        row = self._registry.connection.execute(query, parameters).fetchone()
+            row = self._registry.connection.execute(query, parameters).fetchone()
+        else:
+            rows = self._registry.connection.execute(query, parameters).fetchall()
+            row = max(rows, key=lambda candidate: semantic_version_key(str(candidate["version"])), default=None)
         if row is None:
             raise KeyError((project_id, artifact_id, version))
         return self._artifact_from_row(row)
@@ -257,11 +323,13 @@ class _SQLiteArtifactRepository:
             """
             SELECT * FROM artifact_versions
             WHERE project_id = ? AND artifact_id = ?
-            ORDER BY version ASC
             """,
             (project_id, artifact_id),
         ).fetchall()
-        return [self._artifact_from_row(row) for row in rows]
+        return [
+            self._artifact_from_row(row)
+            for row in sorted(rows, key=lambda candidate: semantic_version_key(str(candidate["version"])))
+        ]
 
     @staticmethod
     def _artifact_from_row(row: sqlite3.Row) -> Artifact:
@@ -283,16 +351,23 @@ class _SQLiteArtifactRepository:
 
 
 class _SQLiteEvidenceRepository:
-    def __init__(self, registry: SQLiteRegistry) -> None:
+    def __init__(
+        self,
+        registry: SQLiteRegistry,
+        transaction: _SQLiteRegistryTransaction | None = None,
+    ) -> None:
         self._registry = registry
+        self._transaction = transaction
 
     def put(self, evidence: Evidence, content: bytes) -> Evidence:
         """Insert evidence once, deriving its hash from the original bytes."""
-        if not isinstance(content, bytes):
-            raise TypeError("evidence content must be bytes")
-        saved = evidence.model_copy(update={"content_hash": sha256(content).hexdigest()})
+        if self._transaction is not None:
+            self._transaction._ensure_active()
 
         def insert() -> Evidence:
+            if not isinstance(content, bytes):
+                raise TypeError("evidence content must be bytes")
+            saved = evidence.model_copy(update={"content_hash": sha256(content).hexdigest()})
             connection = self._registry.connection
             try:
                 connection.execute(

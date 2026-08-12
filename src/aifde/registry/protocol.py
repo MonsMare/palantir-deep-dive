@@ -15,7 +15,7 @@ class ArtifactRepository(Protocol):
         """Store a new artifact version without changing an existing version."""
 
     def get(
-        self, project_id: str, artifact_id: str, version: int | None = None
+        self, project_id: str, artifact_id: str, version: str | None = None
     ) -> Artifact:
         """Return a specific version or the latest version when omitted."""
 
@@ -44,3 +44,6 @@ class RegistryTransaction(Protocol):
 
     def commit(self) -> None:
         """Atomically make all writes in this transaction durable."""
+
+    def rollback(self) -> None:
+        """Discard all writes in this transaction."""

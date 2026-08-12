@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import json
+import re
 from typing import Any, Mapping, Self
 from uuid import uuid4
 
@@ -17,6 +18,28 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+
+_SEMANTIC_VERSION_PATTERN = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+
+
+def normalize_semantic_version(version: str | int) -> str:
+    """Normalize legacy integer majors to the strict semantic version format."""
+    if isinstance(version, int) and not isinstance(version, bool):
+        if version < 0:
+            raise ValueError("version major must be non-negative")
+        version = f"{version}.0.0"
+    if not isinstance(version, str):
+        raise ValueError("version must be a semantic version string")
+    if not _SEMANTIC_VERSION_PATTERN.fullmatch(version):
+        raise ValueError("version must be MAJOR.MINOR.PATCH without leading zeroes")
+    return version
+
+
+def semantic_version_key(version: str) -> tuple[int, int, int]:
+    """Return the strict three-part semantic version ordering key."""
+    normalize_semantic_version(version)
+    return tuple(int(part) for part in version.split("."))  # type: ignore[return-value]
 
 
 def canonical_json_bytes(value: JsonValue) -> bytes:
@@ -47,7 +70,7 @@ class Artifact(BaseModel):
     artifact_id: str
     project_id: str
     kind: str
-    version: int = Field(default=1, ge=1)
+    version: str = "1.0.0"
     status: str = "draft"
     owner: str
     content: JsonValue
@@ -103,6 +126,12 @@ class Artifact(BaseModel):
             raise ValueError("must not be empty")
         return value
 
+    @field_validator("version", mode="before")
+    @classmethod
+    def normalize_semantic_version(cls, value: Any) -> str:
+        """Accept legacy integer majors while requiring strict string semantics."""
+        return normalize_semantic_version(value)
+
     @classmethod
     def build(
         cls,
@@ -112,7 +141,7 @@ class Artifact(BaseModel):
         content: JsonValue,
         owner: str,
         artifact_id: str | None = None,
-        version: int = 1,
+        version: str | int = "1.0.0",
         status: str = "draft",
         depends_on: list[str] | None = None,
         evidence_refs: list[str] | None = None,
