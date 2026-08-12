@@ -25,6 +25,7 @@ class StageRun(BaseModel):
     stage_run_id: str
     project_id: str
     stage_id: str
+    actor: str | None = None
     state: StageState = StageState.DRAFT
     input_artifact_ids: list[str] = Field(default_factory=list)
     output_artifact_ids: list[str] = Field(default_factory=list)

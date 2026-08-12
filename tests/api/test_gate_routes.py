@@ -180,7 +180,12 @@ def test_action_route_rejects_ungoverned_request_before_fake_broker(
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("success", True), ("status", "succeeded"), ("outcome_id", "forged-outcome")],
+    [
+        ("success", True),
+        ("status", "succeeded"),
+        ("approval_status", "approved"),
+        ("outcome_id", "forged-outcome"),
+    ],
 )
 def test_action_route_rejects_caller_forged_outcome_or_approval_fields(
     client: TestClient, action_broker: FakeActionBroker, field: str, value: Any
@@ -195,7 +200,7 @@ def test_action_route_rejects_caller_forged_outcome_or_approval_fields(
 
 def test_real_action_broker_rejects_mismatched_approval_claim() -> None:
     payload = governed_action_payload()
-    payload["approval_id"] = "forged-approval"
+    payload["request"]["approval_id"] = "forged-approval"
     record = ApprovedActionRecord(
         action_id="action-1",
         action_type="ReplanSprint",
@@ -261,12 +266,23 @@ def test_real_action_broker_rejects_missing_governance_without_fallback_executio
         action_broker=broker,
     )
 
+    minimal_request = {
+        key: governed_action_payload()["request"][key]
+        for key in (
+            "action_id",
+            "action_type",
+            "target_id",
+            "parameters",
+            "requested_by",
+            "idempotency_key",
+        )
+    }
     response = TestClient(app).post(
         "/actions",
-        json={"request": governed_action_payload()["request"], "actor": "release-owner-1"},
+        json={"request": minimal_request, "actor": "release-owner-1"},
     )
 
-    assert response.status_code in {422, 403}
+    assert response.status_code == 422
     assert broker.audit_records == []
 
 

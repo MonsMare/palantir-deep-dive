@@ -31,6 +31,7 @@ class TaskContract(_StrictContractModel):
     task_id: str
     objective: str
     stage_id: str
+    actor: str | None = None
     allowed_evidence: list[str]
     required_output: list[str]
     forbidden_assumptions: list[str]

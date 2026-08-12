@@ -263,7 +263,7 @@ def build_router(
 
         return ActionOutcomeResponse(
             outcome_id=_get_attr(outcome, "outcome_id"),
-            action_id=_get_attr(outcome, "action_id", payload.action_id),
+            action_id=_get_attr(outcome, "action_id", payload.request.action_id),
             status=_get_attr(outcome, "status"),
         )
 
