@@ -165,13 +165,16 @@ class StageRunner:
         if not isinstance(actor, str) or not actor.strip():
             raise ValueError("actor must be a non-empty identity")
 
-        task_id = f"api-{_slug(project_id)}-{_slug(stage_id)}"
+        if not self.raw_evidence:
+            raise ValueError("raw evidence is required before creating a stage run")
+
+        task_id = f"api-{_slug(project_id)}-{_slug(stage_id)}-{uuid4()}"
         contract = TaskContract(
             task_id=task_id,
             objective=f"Produce a governed proposal for {stage_id}.",
             stage_id=stage_id,
             actor=actor,
-            allowed_evidence=["evidence-1"],
+            allowed_evidence=list(self.raw_evidence),
             required_output=[_stage_output_kind(stage_id)],
             forbidden_assumptions=[],
             acceptance_tests=[f"Review {stage_id} against the allowed evidence."],
@@ -423,10 +426,8 @@ class StageRunner:
 
     def _ensure_raw_evidence(self, evidence_refs: list[str]) -> None:
         for evidence_id in evidence_refs:
-            self.raw_evidence.setdefault(
-                evidence_id,
-                {"text": f"raw evidence fixture for {evidence_id}"},
-            )
+            if evidence_id not in self.raw_evidence:
+                raise KeyError(f"unknown raw evidence: {evidence_id}")
 
     def _evidence_snapshot_hash(self, evidence_refs: list[str]) -> str:
         return _hash_json(

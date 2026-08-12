@@ -114,3 +114,35 @@ def test_stage_runner_records_api_actor_on_real_run():
     assert run.project_id == "project-1"
     assert run.stage_id == "decision.contract"
     assert run.actor == "builder"
+
+
+def test_create_stage_run_uses_unique_run_and_artifact_ids_each_time():
+    runner = StageRunner.for_testing(
+        project_id="project-1",
+        raw_evidence={"customer-interview": {"text": "approved source"}},
+    )
+
+    first = runner.create_stage_run(
+        project_id="project-1", stage_id="decision.contract", actor="builder"
+    )
+    second = runner.create_stage_run(
+        project_id="project-1", stage_id="decision.contract", actor="builder"
+    )
+
+    assert first.stage_run_id != second.stage_run_id
+    assert set(first.output_artifact_ids).isdisjoint(second.output_artifact_ids)
+    assert first.actor == "builder"
+    assert second.actor == "builder"
+
+
+def test_create_stage_run_rejects_empty_raw_evidence_without_producing_output():
+    runner = StageRunner.for_testing(project_id="project-1", raw_evidence={})
+
+    with pytest.raises((ValueError, KeyError), match="evidence"):
+        runner.create_stage_run(
+            project_id="project-1", stage_id="decision.contract", actor="builder"
+        )
+
+    assert runner.stage_runs == {}
+    assert runner.artifacts == {}
+    assert runner.raw_evidence == {}
