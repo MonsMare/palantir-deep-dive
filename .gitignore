@@ -11,6 +11,7 @@ docs/superpowers/specs/2026-08-10-jiu-hu-v2-design.md
 
 # Local tool state
 .reasonix/
+.worktrees/
 
 # Common local artifacts
 __pycache__/
