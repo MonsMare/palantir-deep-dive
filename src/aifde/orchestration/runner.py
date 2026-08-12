@@ -13,6 +13,7 @@ from aifde.domain.gates import GateResult
 from aifde.domain.stages import StageRun, StageState
 from aifde.gates.engine import GateEngine, StageTransition, TransitionBlocked
 from aifde.gates.validators import ValidationContext, ValidationResult
+from aifde.policy.capabilities import PolicyEngine
 from aifde.policy.gateway import ToolGateway
 
 from .agents import FakeBuilder, FakeChallenger
@@ -92,6 +93,7 @@ class StageRunner:
             stage_run_id=stage_run_id,
             project_id=self.project_id,
             stage_id=contract.stage_id,
+            actor=contract.actor,
             state=StageState.DRAFT,
             output_artifact_ids=artifact_ids,
             evidence_refs=list(
@@ -142,6 +144,40 @@ class StageRunner:
                 actor=self.challenger.actor_id,
             )
         return _copy_stage_run(self.stage_runs[stage_run_id])
+
+    def create_stage_run(self, project_id: str, stage_id: str, actor: str) -> StageRun:
+        """Adapt an API request into the formal ``run(TaskContract)`` boundary.
+
+        This method deliberately constructs no ``StageRun`` and mutates no
+        runner state itself.  It validates the API identities, creates the
+        minimum evidence-bound contract, and delegates all execution and
+        transitions to ``run`` and its GateEngine-backed collaborators.
+        """
+
+        if not isinstance(project_id, str) or not project_id.strip():
+            raise ValueError("project_id must be a non-empty identity")
+        if project_id != self.project_id:
+            raise KeyError(f"unknown project: {project_id}")
+        if not isinstance(stage_id, str) or not stage_id.strip():
+            raise ValueError("stage_id must be a non-empty identity")
+        if stage_id not in PolicyEngine.KNOWN_STAGE_IDS:
+            raise ValueError(f"unknown stage_id: {stage_id}")
+        if not isinstance(actor, str) or not actor.strip():
+            raise ValueError("actor must be a non-empty identity")
+
+        task_id = f"api-{_slug(project_id)}-{_slug(stage_id)}"
+        contract = TaskContract(
+            task_id=task_id,
+            objective=f"Produce a governed proposal for {stage_id}.",
+            stage_id=stage_id,
+            actor=actor,
+            allowed_evidence=["evidence-1"],
+            required_output=[_stage_output_kind(stage_id)],
+            forbidden_assumptions=[],
+            acceptance_tests=[f"Review {stage_id} against the allowed evidence."],
+            escalation_conditions=[f"Escalate unresolved questions for {stage_id}."],
+        )
+        return self.run(contract)
 
     def challenge(self, artifact_id: str) -> ChallengeReport:
         if artifact_id not in self.artifact_to_run:
@@ -208,6 +244,7 @@ class StageRunner:
             stage_run_id=stage_run_id,
             project_id=self.project_id,
             stage_id=contract.stage_id,
+            actor=contract.actor,
             state=StageState.DRAFT,
             input_artifact_ids=[f"{stage_run_id}-contract"],
             evidence_refs=[snapshot_id],
@@ -409,3 +446,30 @@ def _hash_json(value: Any) -> str:
         return sha256(canonical_json_bytes(value)).hexdigest()
     except ValueError:
         return sha256(str(value).encode("utf-8")).hexdigest()
+
+
+_STAGE_OUTPUT_KINDS = {
+    "project.charter": "ProjectCharter",
+    "decision.contract": "DecisionContract",
+    "workflow.observation": "WorkflowObservation",
+    "requirements.distill": "RequirementsSpecification",
+    "solution.design": "SolutionDesign",
+    "data.registration": "DataRegistration",
+    "data.product": "DataProduct",
+    "ontology.design": "OntologyModel",
+    "model.training": "ModelPackage",
+    "decision.optimization": "OptimizationPlan",
+    "application.delivery": "ApplicationDelivery",
+    "operations.feedback": "OperationsFeedback",
+}
+
+
+def _stage_output_kind(stage_id: str) -> str:
+    try:
+        return _STAGE_OUTPUT_KINDS[stage_id]
+    except KeyError as exc:
+        raise ValueError(f"unknown stage_id: {stage_id}") from exc
+
+
+def _slug(value: str) -> str:
+    return "".join(char.lower() if char.isalnum() else "-" for char in value).strip("-")

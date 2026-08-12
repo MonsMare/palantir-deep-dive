@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 from aifde.api.app import create_app
+from aifde.domain.actions import ActionRequest
+from aifde.policy.capabilities import ActorRole, ApprovedActionRecord
+from aifde.tools.actions import ActionBroker
 
 
 pytest.importorskip("fastapi")
@@ -63,6 +67,37 @@ class FakeActionBroker:
         )
 
 
+def governed_action_payload(
+    *, action_id: str = "action-1", target_id: str = "sprint-1"
+) -> dict[str, Any]:
+    """Build the explicit governed request shape accepted by the API."""
+
+    return {
+        "request": {
+            "action_id": action_id,
+            "action_type": "ReplanSprint",
+            "target_id": target_id,
+            "parameters": {"capacity": 8},
+            "requested_by": "builder-1",
+            "idempotency_key": f"idem-{action_id}",
+            "execution_mode": "mock",
+            "policy_id": "mock-actions",
+            "policy_version": "1",
+            "validation_id": f"validation-{action_id}",
+            "validated_by": "deterministic-verifier-1",
+            "validation_status": "passed",
+            "approval_id": f"approval-{action_id}",
+            "approval_actor": "domain-owner-1",
+            "approval_role": "domain-owner",
+            "approval_status": "approved",
+            "audit_ref": f"audit-{action_id}",
+            "audit_actor": "audit-service",
+            "outcome_status": "pending",
+        },
+        "actor": "release-owner-1",
+    }
+
+
 @pytest.fixture
 def action_broker() -> FakeActionBroker:
     return FakeActionBroker()
@@ -113,41 +148,140 @@ def test_unknown_project_gate_list_returns_not_found(client: TestClient) -> None
 def test_action_route_delegates_to_broker_boundary(
     client: TestClient, action_broker: FakeActionBroker
 ) -> None:
-    response = client.post(
-        "/actions",
-        json={
-            "action_id": "action-1",
-            "action_type": "ReplanSprint",
-            "target_id": "sprint-1",
-            "parameters": {"capacity": 8},
-            "requested_by": "builder-1",
-            "idempotency_key": "idem-1",
-            "actor": "release-owner-1",
-        },
-    )
+    response = client.post("/actions", json=governed_action_payload())
 
     assert response.status_code == 200
     assert response.json()["outcome_id"] == "outcome-1"
     assert action_broker.requests[0][1] == "release-owner-1"
+    assert isinstance(action_broker.requests[0][0], ActionRequest)
 
 
-def test_action_route_does_not_accept_caller_forged_outcome(client: TestClient) -> None:
+def test_action_route_rejects_ungoverned_request_before_fake_broker(
+    client: TestClient, action_broker: FakeActionBroker
+) -> None:
     response = client.post(
         "/actions",
         json={
-            "action_id": "action-1",
-            "action_type": "ReplanSprint",
-            "target_id": "sprint-1",
-            "parameters": {},
-            "requested_by": "builder-1",
-            "idempotency_key": "idem-1",
+            "request": {
+                "action_id": "action-1",
+                "action_type": "ReplanSprint",
+                "target_id": "sprint-1",
+                "parameters": {"capacity": 8},
+                "requested_by": "builder-1",
+                "idempotency_key": "idem-1",
+            },
             "actor": "release-owner-1",
-            "success": True,
-            "status": "succeeded",
-            "approval_status": "approved",
         },
     )
 
-    assert response.status_code in {200, 422}
-    if response.status_code == 200:
-        assert "success" not in response.json() or response.json()["success"] is not True
+    assert response.status_code == 422
+    assert action_broker.requests == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("success", True), ("status", "succeeded"), ("outcome_id", "forged-outcome")],
+)
+def test_action_route_rejects_caller_forged_outcome_or_approval_fields(
+    client: TestClient, action_broker: FakeActionBroker, field: str, value: Any
+) -> None:
+    payload = governed_action_payload()
+    payload[field] = value
+    response = client.post("/actions", json=payload)
+
+    assert response.status_code == 422
+    assert action_broker.requests == []
+
+
+def test_real_action_broker_rejects_mismatched_approval_claim() -> None:
+    payload = governed_action_payload()
+    payload["approval_id"] = "forged-approval"
+    record = ApprovedActionRecord(
+        action_id="action-1",
+        action_type="ReplanSprint",
+        execution_mode="mock",
+        requested_by="builder-1",
+        validation_status="passed",
+        approval_id="approval-action-1",
+        approval_actor="domain-owner-1",
+        approval_role=ActorRole.DOMAIN_OWNER,
+        approval_status="approved",
+    )
+    broker = ActionBroker(approved_actions=[record])
+    app = create_app(
+        registry=FakeRegistry(),
+        gate_engine=FakeGateEngine(),
+        stage_runner=SimpleNamespace(),
+        action_broker=broker,
+    )
+
+    response = TestClient(app).post("/actions", json=payload)
+
+    assert response.status_code == 403
+    assert broker.audit_records
+    assert broker.audit_records[-1].event == "deny"
+    with pytest.raises(KeyError):
+        broker.get_outcome("action-1")
+
+
+def test_real_action_broker_executes_only_a_fully_governed_request() -> None:
+    payload = governed_action_payload()
+    record = ApprovedActionRecord(
+        action_id="action-1",
+        action_type="ReplanSprint",
+        execution_mode="mock",
+        requested_by="builder-1",
+        validation_status="passed",
+        approval_id="approval-action-1",
+        approval_actor="domain-owner-1",
+        approval_role=ActorRole.DOMAIN_OWNER,
+        approval_status="approved",
+    )
+    broker = ActionBroker(approved_actions=[record])
+    app = create_app(
+        registry=FakeRegistry(),
+        gate_engine=FakeGateEngine(),
+        stage_runner=SimpleNamespace(),
+        action_broker=broker,
+    )
+
+    response = TestClient(app).post("/actions", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "succeeded"
+    assert broker.get_outcome("action-1").action_id == "action-1"
+
+
+def test_real_action_broker_rejects_missing_governance_without_fallback_execution() -> None:
+    broker = ActionBroker()
+    app = create_app(
+        registry=FakeRegistry(),
+        gate_engine=FakeGateEngine(),
+        stage_runner=SimpleNamespace(),
+        action_broker=broker,
+    )
+
+    response = TestClient(app).post(
+        "/actions",
+        json={"request": governed_action_payload()["request"], "actor": "release-owner-1"},
+    )
+
+    assert response.status_code in {422, 403}
+    assert broker.audit_records == []
+
+
+def test_real_action_broker_denies_unapproved_execution() -> None:
+    broker = ActionBroker()
+    app = create_app(
+        registry=FakeRegistry(),
+        gate_engine=FakeGateEngine(),
+        stage_runner=SimpleNamespace(),
+        action_broker=broker,
+    )
+
+    response = TestClient(app).post("/actions", json=governed_action_payload())
+
+    assert response.status_code == 403
+    with pytest.raises(KeyError):
+        broker.get_outcome("action-1")
+    assert broker.audit_records[-1].event == "deny"

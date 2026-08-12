@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, JsonValue, ValidationError
+
+from aifde.domain.actions import ActionRequest
+from aifde.domain.stages import StageState
+from aifde.gates.engine import TransitionBlocked
 
 
 def _model_config(extra: str = "ignore") -> dict[str, Any]:
@@ -55,6 +58,7 @@ class StageRunResponse(BaseModel):
     stage_run_id: str
     project_id: str
     stage_id: str
+    actor: str | None = None
     state: str
 
     model_config = _model_config()
@@ -78,12 +82,14 @@ class TransitionResponse(BaseModel):
 
 
 class ActionExecuteRequest(BaseModel):
-    action_id: str
-    action_type: str
-    target_id: str
-    parameters: dict[str, Any] = Field(default_factory=dict)
-    requested_by: str
-    idempotency_key: str
+    """An execution envelope for an already-governed domain request.
+
+    An ungoverned proposal is a different concept and cannot be promoted by
+    this API.  The nested domain request is fully validated before this route
+    runs, while ActionBroker remains authoritative for policy and approval.
+    """
+
+    request: ActionRequest
     actor: str
 
     model_config = _model_config("forbid")
@@ -103,12 +109,6 @@ def _get_attr(value: Any, name: str, default: Any = None) -> Any:
     return getattr(value, name, default)
 
 
-def _dump_model(value: BaseModel) -> dict[str, Any]:
-    if hasattr(value, "model_dump"):
-        return value.model_dump()
-    return value.dict()
-
-
 def _ensure_project(registry: Any, project_id: str) -> Any:
     try:
         return registry.get_project(project_id)
@@ -116,24 +116,15 @@ def _ensure_project(registry: Any, project_id: str) -> Any:
         raise HTTPException(status_code=404, detail="unknown project") from exc
 
 
-def _build_action_request(payload: ActionExecuteRequest) -> Any:
-    fields = {
-        "action_id": payload.action_id,
-        "action_type": payload.action_type,
-        "target_id": payload.target_id,
-        "parameters": payload.parameters,
-        "requested_by": payload.requested_by,
-        "idempotency_key": payload.idempotency_key,
-    }
-    try:
-        from aifde.domain.actions import ActionRequest
-    except ImportError:
-        return fields
+def _build_action_request(payload: ActionExecuteRequest) -> ActionRequest:
+    """Build only a fully validated domain request; never downgrade its type."""
 
     try:
-        return ActionRequest(**fields)
-    except Exception:
-        return SimpleNamespace(**fields)
+        return ActionRequest.model_validate(
+            payload.request.model_dump(mode="python")
+        )
+    except (ValidationError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def build_router(
@@ -195,6 +186,7 @@ def build_router(
 
     @router.post("/projects/{project_id}/stage-runs", response_model=StageRunResponse)
     def create_stage_run(project_id: str, payload: StageRunCreateRequest) -> StageRunResponse:
+        _ensure_project(registry, project_id)
         try:
             stage_run = stage_runner.create_stage_run(
                 project_id=project_id,
@@ -203,12 +195,15 @@ def build_router(
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="unknown project") from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return StageRunResponse(
             stage_run_id=_get_attr(stage_run, "stage_run_id"),
             project_id=_get_attr(stage_run, "project_id", project_id),
             stage_id=_get_attr(stage_run, "stage_id", payload.stage_id),
+            actor=_get_attr(stage_run, "actor"),
             state=_get_attr(stage_run, "state"),
         )
 
@@ -217,7 +212,12 @@ def build_router(
         stage_run_id: str, payload: TransitionRequest
     ) -> TransitionResponse:
         try:
-            decision = gate_engine.can_transition(stage_run_id, payload.target)
+            target = StageState(payload.target)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        try:
+            decision = gate_engine.can_transition(stage_run_id, target)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="unknown stage run") from exc
         except ValueError as exc:
@@ -231,16 +231,20 @@ def build_router(
             )
 
         try:
-            transition = gate_engine.transition(stage_run_id, payload.target, payload.actor)
+            transition = gate_engine.transition(stage_run_id, target, payload.actor)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="unknown stage run") from exc
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except TransitionBlocked as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         return TransitionResponse(
             stage_run_id=_get_attr(transition, "stage_run_id", stage_run_id),
             from_state=_get_attr(transition, "from_state"),
-            to_state=_get_attr(transition, "to_state", payload.target),
+            to_state=_get_attr(transition, "to_state", target.value),
             actor=_get_attr(transition, "actor", payload.actor),
             gate_run_ids=list(_get_attr(transition, "gate_run_ids", []) or []),
         )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from aifde.domain.stages import StageState
+from aifde.domain.stages import StageRun, StageState
 from aifde.orchestration.contracts import TaskContract
 from aifde.orchestration.runner import StageRunner
 
@@ -75,3 +75,42 @@ def test_stage_runner_delegates_requested_transition_to_gate_engine():
 @pytest.mark.parametrize("method_name", ["run", "challenge", "request_transition"])
 def test_stage_runner_api_is_present(method_name: str):
     assert hasattr(StageRunner, method_name)
+
+
+def test_stage_runner_api_adapter_delegates_to_formal_run(monkeypatch: pytest.MonkeyPatch):
+    runner = StageRunner.for_testing(project_id="project-1")
+    observed: list[TaskContract] = []
+
+    def formal_run(contract: TaskContract) -> StageRun:
+        observed.append(contract)
+        return StageRun(
+            stage_run_id="api-run-1",
+            project_id="project-1",
+            stage_id=contract.stage_id,
+        )
+
+    monkeypatch.setattr(runner, "run", formal_run)
+
+    run = runner.create_stage_run(
+        project_id="project-1", stage_id="decision.contract", actor="builder"
+    )
+
+    assert run.stage_run_id == "api-run-1"
+    assert len(observed) == 1
+    assert observed[0].actor == "builder"
+    assert observed[0].objective
+    assert observed[0].allowed_evidence
+    assert observed[0].required_output
+    assert runner.stage_runs == {}
+
+
+def test_stage_runner_records_api_actor_on_real_run():
+    runner = StageRunner.for_testing(project_id="project-1")
+
+    run = runner.create_stage_run(
+        project_id="project-1", stage_id="decision.contract", actor="builder"
+    )
+
+    assert run.project_id == "project-1"
+    assert run.stage_id == "decision.contract"
+    assert run.actor == "builder"

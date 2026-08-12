@@ -7,6 +7,9 @@ from types import SimpleNamespace
 import pytest
 
 from aifde.api.app import create_app
+from aifde.domain.stages import StageRun, StageState
+from aifde.orchestration.contracts import TaskContract
+from aifde.orchestration.runner import StageRunner
 
 
 pytest.importorskip("fastapi")
@@ -103,6 +106,46 @@ def test_stage_run_route_delegates_to_stage_runner(client: TestClient) -> None:
     assert response.status_code == 200
     assert response.json()["stage_run_id"] == "run-created"
     assert response.json()["project_id"] == "p1"
+
+
+def test_real_stage_runner_route_adapts_to_formal_run_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = StageRunner.for_testing(project_id="p1")
+    observed: list[TaskContract] = []
+
+    def formal_run(contract: TaskContract) -> StageRun:
+        observed.append(contract)
+        return StageRun(
+            stage_run_id="run-adapted",
+            project_id="p1",
+            stage_id=contract.stage_id,
+            state=StageState.DRAFT,
+        )
+
+    monkeypatch.setattr(runner, "run", formal_run)
+    app = create_app(
+        registry=FakeRegistry(),
+        gate_engine=FakeGateEngine(),
+        stage_runner=runner,
+        action_broker=SimpleNamespace(),
+    )
+
+    response = TestClient(app).post(
+        "/projects/p1/stage-runs",
+        json={"stage_id": "decision.contract", "actor": "builder"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["stage_run_id"] == "run-adapted"
+    assert len(observed) == 1
+    contract = observed[0]
+    assert isinstance(contract, TaskContract)
+    assert contract.actor == "builder"
+    assert contract.objective
+    assert contract.allowed_evidence
+    assert contract.required_output
+    assert runner.stage_runs == {}
 
 
 def test_transition_route_returns_409_on_hard_gate_failure(client: TestClient) -> None:
