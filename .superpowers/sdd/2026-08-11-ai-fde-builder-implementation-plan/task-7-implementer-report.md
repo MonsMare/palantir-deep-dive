@@ -16,6 +16,19 @@
 3. 修正测试以匹配现有 `ToolContext`、`ToolGateway`、`GateEngine` 契约后，骨架阶段得到 6 个 `NotImplementedError` 红灯。
 4. 修复两个 Turtle fixture 的类型语句为 `aifde:req-1 a aifde:Requirement ;` 后进入实现迭代。
 
+## 修复轮次：fail-closed 与防御不可变性
+
+- 在 `tests/gates/test_shacl_validator.py` 先新增 3 个回归测试：
+  - fallback Turtle parser 必须拒绝缺少 `@prefix` 终止点的 malformed input。
+  - `ShapeLoader` 必须拒绝未实现的 SHACL 谓词，例如 `sh:maxCount`、`sh:datatype`，不得把 unsupported-only shape 当成空约束通过。
+  - `ValidationResult` 的 `violations`、`warnings`、`evidence_refs` 不允许 `append`、`assign`、`pop` 等嵌套 mutation，且 `model_dump(mode="json")` 仍输出 JSON-compatible list。
+- RED 验证：`C:\ProgramData\anaconda3\python.exe -m pytest tests/gates/test_shacl_validator.py -q` 得到 `3 failed, 6 passed`，三个新增测试均按预期失败。
+- GREEN 实现：
+  - `src/aifde/ontology/rdf.py`：fallback parser 的 prefix directive 现在强制消费终止 `.`，缺失时抛出可读 `RDFParseError`。
+  - `src/aifde/ontology/shapes.py`：加载 NodeShape/property shape 时先扫描 unsupported `sh:*` 谓词并 fail closed；property constraint 缺少已实现 enforcing predicate 时抛出 `ShapeParseError`。
+  - `src/aifde/tools/validation.py`：`ValidationResult` 使用 list-compatible 只读字符串列表，保留现有等值比较和 JSON 序列化行为，同时阻止嵌套 mutation。
+- 维持既有行为：SHACL valid/invalid、hard gate 阻断、Gateway `VALIDATE` 能力边界、warning/message 可读性均由原有测试继续覆盖。
+
 ## 依赖与运行模式
 
 本次实际解释器为 `C:\ProgramData\anaconda3\python.exe`，环境探测结果为：
@@ -27,10 +40,10 @@
 
 ## 验证结果
 
-- `C:\ProgramData\anaconda3\python.exe -m pytest tests/gates/test_shacl_validator.py -q`：`6 passed`
-- `C:\ProgramData\anaconda3\python.exe -m pytest -q`：`134 passed`
-- `C:\ProgramData\anaconda3\python.exe -m compileall -q src`：exit code `0`
-- `git diff --check`：exit code `0`
+- `C:\ProgramData\anaconda3\python.exe -m pytest tests/gates/test_shacl_validator.py -q`：`9 passed`
+- `C:\ProgramData\anaconda3\python.exe -m pytest -q`：`137 passed`
+- `C:\ProgramData\anaconda3\python.exe -m compileall src tests`：exit code `0`
+- `git diff --check`：exit code `0`（仅 Git for Windows 的 LF/CRLF 提示，无 whitespace error）
 
 ## 实际模型
 

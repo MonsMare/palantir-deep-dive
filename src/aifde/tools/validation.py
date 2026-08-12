@@ -34,18 +34,28 @@ _PYSHACL_WARNING = (
 )
 
 
+class _ImmutableStringList(list[str]):
+    """List-compatible defensive value whose mutators fail closed."""
+
+    def _immutable(self, *_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("immutable validation result")
+
+    __setitem__ = __delitem__ = append = clear = extend = insert = pop = remove = reverse = sort = _immutable
+    __iadd__ = __imul__ = _immutable
+
+
 class ValidationResult(BaseModel):
     """Stable semantic-validation result with hashes and readable evidence."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     passed: bool
-    violations: list[str] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
+    violations: list[str] = Field(default_factory=_ImmutableStringList)
+    warnings: list[str] = Field(default_factory=_ImmutableStringList)
     data_hash: str
     shapes_hash: str
     validator_version: str = VALIDATOR_VERSION
-    evidence_refs: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=_ImmutableStringList)
     message: str
 
     @field_validator("data_hash", "shapes_hash")
@@ -66,12 +76,12 @@ class ValidationResult(BaseModel):
 
     @field_validator("violations", "warnings", "evidence_refs")
     @classmethod
-    def validate_string_lists(cls, value: list[str]) -> list[str]:
+    def validate_string_lists(cls, value: list[str]) -> _ImmutableStringList:
         if type(value) is not list or any(type(item) is not str or not item.strip() for item in value):
             raise ValueError("references and messages must be lists of non-empty strings")
         if any(item != item.strip() for item in value):
             raise ValueError("references and messages must use canonical text")
-        return list(dict.fromkeys(value))
+        return _ImmutableStringList(dict.fromkeys(value))
 
 
 def _unique(values: Iterable[str]) -> list[str]:

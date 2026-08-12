@@ -373,8 +373,10 @@ def _parse_prefix_directive(cursor: _FallbackCursor, prefixes: dict[str, str]) -
     if not (iri_token.startswith("<") and iri_token.endswith(">")):
         raise RDFParseError("prefix declaration must use an IRI")
     prefixes[prefix_token[:-1]] = iri_token[1:-1]
-    if cursor.peek() == ".":
-        cursor.pop()
+    try:
+        cursor.expect(".")
+    except RDFParseError as exc:
+        raise RDFParseError("prefix declaration must terminate with '.'") from exc
 
 
 def _parse_predicate_objects(

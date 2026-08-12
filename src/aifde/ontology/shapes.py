@@ -24,6 +24,21 @@ SHACL_MESSAGE = f"{SHACL_NS}message"
 SHACL_SEVERITY = f"{SHACL_NS}severity"
 SHACL_VIOLATION = f"{SHACL_NS}Violation"
 SHACL_WARNING = f"{SHACL_NS}Warning"
+_SUPPORTED_SHACL_PROPERTY_PREDICATES = frozenset(
+    {
+        SHACL_PATH,
+        SHACL_MIN_COUNT,
+        SHACL_MESSAGE,
+        SHACL_SEVERITY,
+    }
+)
+_SUPPORTED_SHACL_NODE_SHAPE_PREDICATES = frozenset(
+    {
+        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+        SHACL_TARGET_CLASS,
+        SHACL_PROPERTY,
+    }
+)
 
 
 class ShapeParseError(ValueError):
@@ -97,6 +112,36 @@ def _as_int(value: Any, *, shape_id: str, predicate: str) -> int:
     return result
 
 
+def _format_shape_predicate(predicate: str) -> str:
+    local = _local_name(predicate)
+    if predicate.startswith(SHACL_NS):
+        return f"sh:{local}"
+    return predicate
+
+
+def _reject_unsupported_predicates(
+    graph: Any,
+    *,
+    subject: Any,
+    supported_predicates: frozenset[str],
+    shape_id: str,
+    context: str,
+) -> None:
+    unsupported = sorted(
+        {
+            _uri(predicate)
+            for subj, predicate, _obj in _iter_triples(graph)
+            if subj == subject and _uri(predicate).startswith(SHACL_NS)
+            and _uri(predicate) not in supported_predicates
+        }
+    )
+    if unsupported:
+        readable = ", ".join(_format_shape_predicate(predicate) for predicate in unsupported)
+        raise ShapeParseError(
+            f"unsupported SHACL predicate(s) {readable} on {context} in shape {shape_id!r}"
+        )
+
+
 def _build_constraints(graph: Any) -> tuple[ShapeConstraint, ...]:
     constraints: list[ShapeConstraint] = []
     shape_subjects = {
@@ -107,12 +152,31 @@ def _build_constraints(graph: Any) -> tuple[ShapeConstraint, ...]:
     }
     for shape in sorted(shape_subjects, key=lambda item: _uri(item)):
         shape_id = _uri(shape)
+        _reject_unsupported_predicates(
+            graph,
+            subject=shape,
+            supported_predicates=_SUPPORTED_SHACL_NODE_SHAPE_PREDICATES,
+            shape_id=shape_id,
+            context="NodeShape",
+        )
         target_class_term = _first(graph, shape, SHACL_TARGET_CLASS, required=True)
         target_class = _uri(target_class_term)
         for property_shape in _objects(graph, shape, SHACL_PROPERTY):
+            _reject_unsupported_predicates(
+                graph,
+                subject=property_shape,
+                supported_predicates=_SUPPORTED_SHACL_PROPERTY_PREDICATES,
+                shape_id=shape_id,
+                context="property constraint",
+            )
             path_term = _first(graph, property_shape, SHACL_PATH, required=True)
             path = _uri(path_term)
             min_count_term = _first(graph, property_shape, SHACL_MIN_COUNT)
+            if min_count_term is None:
+                raise ShapeParseError(
+                    f"shape {shape_id!r} property constraint for path {path!r} "
+                    "does not contain a supported enforcing predicate"
+                )
             min_count = 0 if min_count_term is None else _as_int(
                 min_count_term, shape_id=shape_id, predicate=SHACL_MIN_COUNT
             )

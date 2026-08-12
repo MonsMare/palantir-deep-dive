@@ -3,14 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from aifde.domain.stages import StageRun, StageState
 from aifde.gates.engine import GateEngine, TransitionBlocked
 from aifde.gates.validators import ValidationContext
+import aifde.ontology.rdf as rdf_module
 from aifde.policy.capabilities import Capability, PolicyEngine
 from aifde.policy.gateway import ToolGateway
-from aifde.ontology.rdf import OntologyDocument
-from aifde.tools.validation import SemanticValidationTool, ShaclValidator
+from aifde.ontology.rdf import OntologyDocument, RDFParseError
+from aifde.ontology.shapes import ShapeLoader, ShapeParseError
+from aifde.tools.validation import SemanticValidationTool, ShaclValidator, ValidationResult
 
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
@@ -20,6 +23,61 @@ REQUIREMENT_MISSING_OWNER = (FIXTURES / "requirement_missing_owner.ttl").read_te
     encoding="utf-8"
 )
 REQUIREMENT_VALID = (FIXTURES / "requirement_valid.ttl").read_text(encoding="utf-8")
+
+
+def test_fallback_turtle_parser_rejects_prefix_without_terminating_dot(monkeypatch):
+    monkeypatch.setattr(rdf_module, "Graph", None)
+
+    malformed = "@prefix ex: <http://example.com/> ex:s ex:p ex:o ."
+
+    with pytest.raises(RDFParseError, match="prefix.*terminat|declaration"):
+        OntologyDocument.load(malformed)
+
+
+def test_shape_loader_rejects_unsupported_shacl_property_constraints():
+    unsupported_shapes = """
+        @prefix ex: <http://example.com/> .
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+
+        ex:RequirementShape a sh:NodeShape ;
+            sh:targetClass ex:Requirement ;
+            sh:property [
+                sh:path ex:owner ;
+                sh:maxCount 1 ;
+                sh:datatype ex:Person ;
+                sh:message "Owner must be a single person." ;
+            ] .
+    """
+
+    with pytest.raises(ShapeParseError, match="unsupported.*sh:(maxCount|datatype)"):
+        ShapeLoader.load(unsupported_shapes)
+
+
+def test_validation_result_nested_collections_are_defensively_immutable():
+    result = ValidationResult(
+        passed=False,
+        violations=["initial violation"],
+        warnings=["initial warning"],
+        data_hash="0" * 64,
+        shapes_hash="1" * 64,
+        evidence_refs=["urn:aifde:test:evidence"],
+        message="SHACL validation failed.",
+    )
+
+    with pytest.raises((AttributeError, TypeError)):
+        result.violations.append("late mutation")
+    with pytest.raises((AttributeError, TypeError)):
+        result.warnings.pop()
+    with pytest.raises((AttributeError, TypeError)):
+        result.evidence_refs[0] = "urn:aifde:test:mutated"
+    with pytest.raises(ValidationError):
+        result.violations = []
+
+    dumped = result.model_dump(mode="json")
+
+    assert dumped["violations"] == ["initial violation"]
+    assert dumped["warnings"] == ["initial warning"]
+    assert dumped["evidence_refs"] == ["urn:aifde:test:evidence"]
 
 
 def test_requirement_without_owner_fails_shacl_validator():
