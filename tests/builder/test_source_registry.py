@@ -92,7 +92,7 @@ def test_contracts_are_frozen_and_reject_naive_times_and_blank_locations():
             extraction_version="raw-v1",
         )
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValueError, match="locator"):
         EvidenceFragment.from_snapshot(
             SourceSnapshot.capture(make_asset(), "v1", b"x", dt(9), dt(9), "raw-v1"),
             " ",
@@ -228,6 +228,9 @@ def test_same_version_capture_rejects_changed_lineage(registry: SourceRegistry):
     with pytest.raises(ValueError, match="immutable"):
         registry.capture(asset.source_asset_id, "v1", b"one", dt(9), dt(9), "raw-v2")
 
+    with pytest.raises(ValueError, match="immutable"):
+        registry.capture(asset.source_asset_id, "v1", b"one", dt(9), dt(10), "raw-v1")
+
 
 def test_source_registry_rejects_model_generated_sources():
     with pytest.raises(ValidationError, match="source_type"):
@@ -253,6 +256,45 @@ def test_source_registry_rejects_model_generated_sources():
             "internal",
             "policy:none",
             "model-v1",
+            {},
+        )
+
+    with pytest.raises(ValidationError, match="uri"):
+        SourceAsset.register(
+            "model-source",
+            "model://run/1",
+            "text",
+            "agent",
+            0,
+            "internal",
+            "policy:none",
+            "model-v1",
+            {},
+        )
+
+    with pytest.raises(ValidationError, match="source_type"):
+        SourceAsset.register(
+            "llm-source",
+            "fixture://llm-output.txt",
+            "llm",
+            "agent",
+            0,
+            "internal",
+            "policy:none",
+            "llm-v1",
+            {},
+        )
+
+    with pytest.raises(ValidationError, match="source_type"):
+        SourceAsset.register(
+            "agent-source",
+            "fixture://agent-output.txt",
+            "agent",
+            "agent",
+            0,
+            "internal",
+            "policy:none",
+            "agent-v1",
             {},
         )
 
@@ -285,4 +327,38 @@ def test_models_reject_tampered_content_hashes():
             available_at=dt(10),
             extraction_method="markdown",
             extraction_version="raw-v1",
+            confidence=1.0,
         )
+
+
+def test_public_fragment_factory_cannot_bypass_locator_replay():
+    snapshot = SourceSnapshot.capture(
+        make_asset(),
+        "v1",
+        b"source line",
+        dt(9),
+        dt(10),
+        "raw-v1",
+    )
+
+    with pytest.raises(ValueError, match="does not match"):
+        EvidenceFragment.from_snapshot(snapshot, "line:99", "model-generated claim")
+
+
+def test_integrity_hashes_survive_copy_update_boundary(registry: SourceRegistry):
+    asset = registry.register(make_asset())
+    snapshot = registry.capture(
+        asset.source_asset_id,
+        "v1",
+        b"source line",
+        dt(9),
+        dt(10),
+        "raw-v1",
+    )
+    fragment = registry.slice(snapshot.snapshot_id, "line:1", "source line")
+
+    with pytest.raises(ValidationError, match="content_hash"):
+        snapshot.model_copy(update={"content": b"changed"})
+
+    with pytest.raises(ValidationError, match="content_hash"):
+        fragment.model_copy(update={"content": "changed"})

@@ -4,10 +4,29 @@ from __future__ import annotations
 
 from datetime import datetime
 from hashlib import sha256
+import json
 from math import isfinite
-from typing import Any, Mapping
+import re
+from copy import deepcopy
+from typing import Any, Mapping, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+_LINE_LOCATOR = re.compile(r"^line:(\d+)(?:-(\d+))?$")
+_JSON_ARRAY_LOCATOR = re.compile(r"^\$\.([A-Za-z_][A-Za-z0-9_]*)\[(\d+)\]$")
+_MODEL_SOURCE_MARKERS = frozenset(
+    {
+        "agent",
+        "chat",
+        "generative",
+        "inference",
+        "llm",
+        "model",
+        "model output",
+        "prompt",
+    }
+)
 
 
 class _ImmutableList(list[Any]):
@@ -63,6 +82,50 @@ def _content_hash(value: bytes) -> str:
     return sha256(value).hexdigest()
 
 
+def _contains_model_source_marker(value: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+    tokens = set(normalized.split())
+    return bool(tokens & _MODEL_SOURCE_MARKERS) or "model output" in normalized
+
+
+def _replay_locator(source_content: bytes, locator: str) -> str:
+    """Reconstruct a narrow, deterministic evidence slice from source bytes."""
+
+    try:
+        source_text = source_content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("locator cannot be replayed from invalid UTF-8 content") from exc
+
+    line_match = _LINE_LOCATOR.fullmatch(locator)
+    if line_match is not None:
+        start = int(line_match.group(1))
+        end = int(line_match.group(2) or start)
+        if start < 1 or end < start:
+            raise ValueError("invalid line locator")
+        lines = source_text.splitlines()
+        if end > len(lines):
+            raise ValueError("line locator is outside source content")
+        return "\n".join(lines[start - 1 : end])
+
+    json_match = _JSON_ARRAY_LOCATOR.fullmatch(locator)
+    if json_match is not None:
+        field_name = json_match.group(1)
+        index = int(json_match.group(2))
+        try:
+            document = json.loads(source_text)
+            if not isinstance(document, dict):
+                raise TypeError("JSON document must be an object")
+            values = document[field_name]
+            if not isinstance(values, list):
+                raise TypeError("JSONPath field must be an array")
+            value = values[index]
+        except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("JSONPath locator cannot be replayed") from exc
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+    raise ValueError("unsupported locator")
+
+
 class SourceAsset(BaseModel):
     """A registered external source identity and its access metadata."""
 
@@ -91,10 +154,19 @@ class SourceAsset(BaseModel):
     def reject_blank_fields(cls, value: str, info: Any) -> str:
         normalized = _require_non_blank(value, info.field_name)
         if info.field_name in {"uri", "source_type"}:
-            markers = ("chat", "prompt", "model-output", "inference")
-            if any(marker in normalized.lower() for marker in markers):
+            if _contains_model_source_marker(normalized):
                 raise ValueError(f"{info.field_name} must not identify model-generated sources")
         return normalized
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        values = self.model_dump(mode="python")
+        if deep:
+            values = deepcopy(values)
+        if update:
+            values.update(dict(update))
+        return type(self).model_validate(values)
 
     @field_validator("metadata", mode="before")
     @classmethod
@@ -179,6 +251,16 @@ class SourceSnapshot(BaseModel):
             raise ValueError("content_hash does not match content")
         return self
 
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        values = self.model_dump(mode="python")
+        if deep:
+            values = deepcopy(values)
+        if update:
+            values.update(dict(update))
+        return type(self).model_validate(values)
+
     @classmethod
     def capture(
         cls,
@@ -260,16 +342,11 @@ class EvidenceFragment(BaseModel):
             raise ValueError("content hash must be a SHA-256 hexadecimal digest")
         return value
 
-    @model_validator(mode="before")
-    @classmethod
-    def validate_content_hash_matches_content(cls, value: Any) -> Any:
-        if isinstance(value, Mapping):
-            content = value.get("content")
-            content_hash = value.get("content_hash")
-            if isinstance(content, str) and isinstance(content_hash, str):
-                if content_hash != _content_hash(content.encode("utf-8")):
-                    raise ValueError("content_hash does not match content")
-        return value
+    @model_validator(mode="after")
+    def validate_content_hash_matches_content(self) -> EvidenceFragment:
+        if self.content_hash != _content_hash(self.content.encode("utf-8")):
+            raise ValueError("content_hash does not match content")
+        return self
 
     @classmethod
     def from_snapshot(
@@ -282,6 +359,12 @@ class EvidenceFragment(BaseModel):
         event_time: datetime | None = None,
         confidence: float = 1.0,
     ) -> EvidenceFragment:
+        try:
+            replayed_content = _replay_locator(snapshot.content, locator)
+        except ValueError as exc:
+            raise ValueError("evidence content does not match locator") from exc
+        if replayed_content != content:
+            raise ValueError("evidence content does not match locator")
         normalized = content if normalized_content is None else normalized_content
         fragment_hash = _content_hash(content.encode("utf-8"))
         identity = f"{snapshot.snapshot_id}\x00{locator}\x00{fragment_hash}"
@@ -303,6 +386,16 @@ class EvidenceFragment(BaseModel):
             event_time=event_time,
             confidence=confidence,
         )
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        values = self.model_dump(mode="python")
+        if deep:
+            values = deepcopy(values)
+        if update:
+            values.update(dict(update))
+        return type(self).model_validate(values)
 
     @property
     def evidence_fragment_id(self) -> str:
