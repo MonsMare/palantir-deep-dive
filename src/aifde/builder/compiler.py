@@ -172,6 +172,11 @@ class MappingCompiler:
             raise ValueError("proposal requires evidence refs before compilation")
         if not proposal.mappings:
             raise ValueError("proposal requires executable mappings before compilation")
+        if proposal.context_digest is None or any(
+            item.context_digest != proposal.context_digest
+            for item in (*proposal.assertions, *proposal.mappings)
+        ):
+            raise ValueError("proposal must be bound context before compilation")
 
         fragments = self._load_fragments(proposal, source_registry)
         mapping_specs = tuple(
@@ -353,6 +358,21 @@ class MappingCompiler:
             provenance = provenance_by_id.get(target_id)
             if provenance is None or not provenance.get("evidence_refs"):
                 violations.append(f"missing provenance for target {target_id!r}")
+        for row in result.canonical_rows:
+            if not row.get("mapping_ids"):
+                violations.append(
+                    f"canonical row {row.get('purchase_order_id', '')!r} requires mapping_ids"
+                )
+        expected_hashes = {
+            "ontology": _hash_text(result.ontology_turtle),
+            "shapes": _hash_text(result.shapes_turtle),
+            "mappings": _hash_json([self._mapping_dict(item) for item in result.mapping_specs]),
+            "canonical_product": _hash_json(result.canonical_rows),
+            "provenance": _hash_json(result.provenance_rows),
+        }
+        for artifact_id, expected in expected_hashes.items():
+            if result.artifact_hashes.get(artifact_id) != expected:
+                violations.append(f"artifact hash mismatch for {artifact_id}")
         violations = list(dict.fromkeys(violations))
         if violations:
             raise ValueError("compiler validation failed: " + "; ".join(violations))

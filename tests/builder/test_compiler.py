@@ -12,6 +12,7 @@ from aifde.builder.semantic import (
     BuilderContext,
     CandidateProposal,
     DeterministicCandidateProvider,
+    MappingCandidate,
     SemanticCandidateBuilder,
 )
 from aifde.builder.sources import SourceRegistry
@@ -218,3 +219,36 @@ def test_rendered_ontology_and_shapes_are_traceable(compiled: CompileResult):
 def test_materialize_requires_evidence_backed_mapping(compiled: CompileResult):
     with pytest.raises(ValueError, match="lineage"):
         replace(compiled.mapping_specs[0], lineage_refs=())
+
+
+def test_compiler_rejects_unbound_draft_proposal():
+    draft = CandidateProposal(
+        evidence_refs=("evidence:unbound",),
+        mappings=(
+            MappingCandidate(
+                mapping_id="mapping:draft",
+                source_evidence_refs=("evidence:unbound",),
+                source_field_path="$.purchase_orders[*].supplier",
+                target_product="purchase_order",
+                target_grain="purchase_order",
+                target_field="supplier_id",
+                identity_rule="supplier key",
+                time_semantics="observed_at",
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="bound context"):
+        MappingCompiler().compile(draft, SourceRegistry(), version="0.1.0")
+
+
+def test_each_canonical_row_has_mapping_lineage(compiled: CompileResult):
+    assert all(row["mapping_ids"] for row in compiled.canonical_rows)
+    assert all(item["mapping_ids"] for item in compiled.provenance_rows)
+
+
+def test_tampered_artifact_hash_is_rejected(compiled: CompileResult):
+    broken = replace(compiled, ontology_turtle=compiled.ontology_turtle + "\n# tampered")
+
+    with pytest.raises(ValueError, match="artifact hash"):
+        MappingCompiler().validate(broken)
