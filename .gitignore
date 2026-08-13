@@ -11,11 +11,13 @@ docs/superpowers/specs/2026-08-10-jiu-hu-v2-design.md
 
 # Local tool state
 .reasonix/
+.worktrees/
 
 # Common local artifacts
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
+projects/software-delivery-demo/fixtures/generated/
 .DS_Store
 Thumbs.db

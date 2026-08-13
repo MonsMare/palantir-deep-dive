@@ -1,0 +1,11 @@
+{
+  "evidence_id": "evidence-1",
+  "source_uri": "https://example.test/source",
+  "locator": "section:1",
+  "content_hash": "unverified",
+  "captured_at": "2026-08-11T00:00:00Z",
+  "classification": "internal",
+  "metadata": {
+    "source": "fixture"
+  }
+}

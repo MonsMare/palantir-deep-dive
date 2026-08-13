@@ -1,0 +1,19 @@
+variables:
+  - accept_change
+  - split_requirement
+  - defer_low_priority_work_items
+  - move_work_item_to_sprint
+  - add_team_capacity
+  - adjust_commitment_date
+objective_terms:
+  - minimize_delay_cost
+  - minimize_high_priority_unfinished_work
+  - minimize_added_resource_cost
+  - minimize_plan_change_cost
+  - minimize_scope_split_penalty
+hard_constraints:
+  - no_dependency_order_violation
+  - no_capacity_over_allocation
+  - required_skills_available
+  - approved_items_immutable
+  - cancelled_items_unscheduled

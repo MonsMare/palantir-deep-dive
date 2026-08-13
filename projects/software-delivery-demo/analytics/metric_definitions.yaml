@@ -1,0 +1,10 @@
+metrics:
+  - requirement_change_count
+  - added_scope_hours
+  - work_item_cycle_days
+  - blocked_duration_days
+  - review_rounds
+  - sprint_completion_rate
+  - team_throughput
+  - remaining_capacity_hours
+  - unresolved_dependency_count

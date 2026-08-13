@@ -19,10 +19,13 @@
 11. [Ontology 化 AI 工程方法论](11-Ontology化AI工程方法论.md)：按阶段、指令、输入、输出和验收标准执行项目。
 12. [数据产品与散乱资料管道方法论](12-数据产品与散乱资料管道方法论.md)：专门处理散乱文件、多源冲突、文档抽取和生产数据产品。
 13. [方法论验收清单](13-方法论验收清单.md)：把设计风险转成可检查的项目门槛。
+14. [Palantir-like 工程公式](14-Palantir-like工程公式.md)：以业务决策为起点，串联数据产品、Ontology、分析、特征、预测、决策/优化、Agent、Action 与反馈闭环。
 
 ## AI FDE 项目设计
 
 - [AI FDE 工程结构复刻项目：需求与系统设计](../docs/superpowers/specs/2026-08-10-ai-fde-engineering-requirements-design.md)：本地/私有资料与 Git 优先的自用 MVP 需求、架构、Agent、工具、数据产品、Ontology、模型、评估和交付规范。
+- [AI FDE Builder 平台设计规格](../docs/superpowers/specs/2026-08-11-ai-fde-builder-design.md)：受门禁控制的工程控制平面、Agent 编排、证据、Artifact、交互界面、三循环和交付治理。
+- [软件研发需求对齐与工期预测样板项目](../docs/superpowers/specs/2026-08-11-software-requirements-alignment-delivery-forecasting-design.md)：用于体验需求对齐、需求追加影响分析、工期预测、计划优化、Mock Action 和反馈闭环的垂直 Ontology 项目。
 
 ## 一句话结论
 

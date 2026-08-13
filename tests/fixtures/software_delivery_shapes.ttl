@@ -1,0 +1,11 @@
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix aifde: <https://aifde.example/ontology/software-delivery#> .
+
+aifde:RequirementShape
+    a sh:NodeShape ;
+    sh:targetClass aifde:Requirement ;
+    sh:property [
+        sh:path aifde:owner ;
+        sh:minCount 1 ;
+        sh:message "Requirement must have an owner." ;
+    ] .

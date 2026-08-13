@@ -1,0 +1,6 @@
+release_policy:
+  baseline_mae_must_not_be_worse: true
+  p80_coverage_minimum: 0.8
+  leakage_required: true
+  temporal_windows_minimum: 1
+  fallback_model: baseline-median-v1

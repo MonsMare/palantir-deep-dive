@@ -1,0 +1,5 @@
+@prefix aifde: <https://aifde.example/ontology/software-delivery#> .
+
+aifde:req-1 a aifde:Requirement ;
+    aifde:title "Define delivery contract" ;
+    aifde:owner "builder" .

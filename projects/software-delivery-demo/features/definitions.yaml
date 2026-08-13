@@ -1,0 +1,31 @@
+features:
+  - feature_id: team.median_cycle_days_5_sprints
+    entity_type: WorkItem
+    grain: one row per WorkItem and observation time
+    window: preceding 5 sprints
+    as_of_time: observation_time
+    availability_lag: 1 day
+    missing_policy: fallback to global median
+    version: 1.0.0
+    lineage: [work_item_lifecycle.team_id, work_item_lifecycle.state_entered_at]
+    leakage_policy: event observed_at <= as_of_time
+  - feature_id: requirement.change_count
+    entity_type: WorkItem
+    grain: one row per WorkItem and observation time
+    window: since requirement creation
+    as_of_time: observation_time
+    availability_lag: 1 day
+    missing_policy: zero
+    version: 1.0.0
+    lineage: [change_events.requirement_id, change_events.observed_at]
+    leakage_policy: future ChangeRequests forbidden
+  - feature_id: work_item.unresolved_dependencies
+    entity_type: WorkItem
+    grain: one row per WorkItem and observation time
+    window: current graph
+    as_of_time: observation_time
+    availability_lag: 1 day
+    missing_policy: zero
+    version: 1.0.0
+    lineage: [dependencies.predecessor_id, dependencies.successor_id]
+    leakage_policy: future blockers forbidden
