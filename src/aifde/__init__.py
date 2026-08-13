@@ -1,0 +1,1 @@
+"""AI FDE domain contracts."""

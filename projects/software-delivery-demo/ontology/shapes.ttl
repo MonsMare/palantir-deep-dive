@@ -1,0 +1,54 @@
+@prefix ex: <urn:software-delivery:> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+
+ex:RequirementShape a sh:NodeShape ;
+    sh:targetClass ex:Requirement ;
+    sh:property [ sh:path ex:requirement_id ; sh:minCount 1 ; sh:message "Requirement requires requirement_id." ] ;
+    sh:property [ sh:path ex:goal ; sh:minCount 1 ; sh:message "Requirement requires goal." ] ;
+    sh:property [ sh:path ex:owner ; sh:minCount 1 ; sh:message "Requirement requires owner." ] ;
+    sh:property [ sh:path ex:status ; sh:minCount 1 ; sh:message "Requirement requires status." ] .
+
+ex:ChangeRequestShape a sh:NodeShape ;
+    sh:targetClass ex:ChangeRequest ;
+    sh:property [ sh:path ex:change_id ; sh:minCount 1 ; sh:message "ChangeRequest requires change_id." ] ;
+    sh:property [ sh:path ex:requested_at ; sh:minCount 1 ; sh:message "ChangeRequest requires requested_at." ] ;
+    sh:property [ sh:path ex:requester ; sh:minCount 1 ; sh:message "ChangeRequest requires requester." ] ;
+    sh:property [ sh:path ex:changes ; sh:minCount 1 ; sh:message "ChangeRequest requires changes relation to Requirement." ] .
+
+ex:WorkItemShape a sh:NodeShape ;
+    sh:targetClass ex:WorkItem ;
+    sh:property [ sh:path ex:work_item_id ; sh:minCount 1 ; sh:message "WorkItem requires work_item_id." ] ;
+    sh:property [ sh:path ex:requirement ; sh:minCount 1 ; sh:message "WorkItem requires requirement." ] ;
+    sh:property [ sh:path ex:module ; sh:minCount 1 ; sh:message "WorkItem requires module." ] ;
+    sh:property [ sh:path ex:status ; sh:minCount 1 ; sh:message "WorkItem requires status." ] ;
+    sh:property [ sh:path ex:team ; sh:minCount 1 ; sh:message "WorkItem requires team." ] .
+
+ex:DependencyShape a sh:NodeShape ;
+    sh:targetClass ex:Dependency ;
+    sh:property [ sh:path ex:predecessor ; sh:minCount 1 ; sh:message "Dependency requires predecessor." ] ;
+    sh:property [ sh:path ex:successor ; sh:minCount 1 ; sh:message "Dependency requires successor." ] ;
+    sh:property [ sh:path ex:dependency_type ; sh:minCount 1 ; sh:message "Dependency requires dependency_type." ] ;
+    sh:property [ sh:path ex:status ; sh:minCount 1 ; sh:message "Dependency requires status." ] .
+
+ex:DeliveryPredictionShape a sh:NodeShape ;
+    sh:targetClass ex:DeliveryPrediction ;
+    sh:property [ sh:path ex:target ; sh:minCount 1 ; sh:message "DeliveryPrediction requires target." ] ;
+    sh:property [ sh:path ex:as_of_time ; sh:minCount 1 ; sh:message "DeliveryPrediction requires as_of_time." ] ;
+    sh:property [ sh:path ex:horizon ; sh:minCount 1 ; sh:message "DeliveryPrediction requires horizon." ] ;
+    sh:property [ sh:path ex:model_version ; sh:minCount 1 ; sh:message "DeliveryPrediction requires model_version." ] ;
+    sh:property [ sh:path ex:feature_snapshot_id ; sh:minCount 1 ; sh:message "DeliveryPrediction requires feature_snapshot_id." ] ;
+    sh:property [ sh:path ex:evidence_refs ; sh:minCount 1 ; sh:message "DeliveryPrediction requires evidence_refs." ] .
+
+ex:CandidatePlanShape a sh:NodeShape ;
+    sh:targetClass ex:CandidatePlan ;
+    sh:property [ sh:path ex:objective_value ; sh:minCount 1 ; sh:message "CandidatePlan requires objective_value." ] ;
+    sh:property [ sh:path ex:constraints ; sh:minCount 1 ; sh:message "CandidatePlan requires constraints." ] ;
+    sh:property [ sh:path ex:feasibility ; sh:minCount 1 ; sh:message "CandidatePlan requires feasibility." ] ;
+    sh:property [ sh:path ex:addresses ; sh:minCount 1 ; sh:message "CandidatePlan requires addresses." ] .
+
+ex:ActionRequestShape a sh:NodeShape ;
+    sh:targetClass ex:ActionRequest ;
+    sh:property [ sh:path ex:action_type ; sh:minCount 1 ; sh:message "ActionRequest requires action_type." ] ;
+    sh:property [ sh:path ex:target_id ; sh:minCount 1 ; sh:message "ActionRequest requires target_id." ] ;
+    sh:property [ sh:path ex:idempotency_key ; sh:minCount 1 ; sh:message "ActionRequest requires idempotency_key." ] ;
+    sh:property [ sh:path ex:approval_state ; sh:minCount 1 ; sh:message "ActionRequest requires approval_state." ] .

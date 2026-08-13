@@ -759,3 +759,31 @@ AI FDE Builder 的本质是：
     验证不可省略
     审批不可隐式
     结果不可丢失
+
+## 20. MVP 实现决策记录
+
+### 20.1 ReleasePackage 与 Gate Engine 的绑定
+
+发布服务不接受调用方提交的“已通过”布尔值、GateRun 列表或审批列表作为权威输入。`ReleaseManager.build(project_id, artifact_ids)` 首先从不可变 Artifact Registry 读取工件，再由 Gate Engine 找到包含这些工件的阶段运行，并要求阶段已经到达 `release_candidate`。随后它再次请求 Gate Engine 判断到 `released` 的转换是否允许，只有通过后才执行唯一的状态转换路径。
+
+ReleasePackage 固化：
+
+- 工件 ID 与发布时的内容哈希；
+- 实际参与发布决策的 GateRun ID；
+- 阶段转换审计 ID（作为当前 MVP 的 approval ID）；
+- 工具版本和策略版本；
+- 每个工件的前一版本、前一版本哈希和前一发布包引用。
+
+这样，发布包不是一份“发布说明”，而是可以重新核验的 provenance manifest。
+
+### 20.2 回滚是追加写入，不是删除或覆盖
+
+回滚先把发布阶段通过 Gate Engine 转回 `remediation`，再在 Registry 事务中为每个工件追加一个新的 patch 版本，将内容恢复为清单中的前一版本。历史版本、原发布包、原 GateRun 和回滚审计 ID 均保留。新版本的哈希变化会使依赖旧工件的 GateRun 失效，系统必须重新验证后才能再次发布。
+
+### 20.3 Feedback 是运行事实
+
+`FeedbackService` 只接受类型化 `Feedback`，按 `feedback_id` 追加写入；重复身份拒绝，返回值和查询结果都经过深拷贝，调用者不能通过修改返回对象篡改历史。Feedback 因此可以承接人工采纳、拒绝、Action 结果和实际业务结果，作为后续特征、模型和需求迭代的输入，而不是被埋在聊天记录里。
+
+### 20.4 绕过路径测试
+
+API、CLI 和 `StageRunner` 都只能调用 Gate Engine 的状态转换接口。测试明确覆盖：失败硬门禁不能被直接发布，不能被 CLI 转换，也不能被编排器转成批准状态；HTTP 层还要求可信 Actor 身份。该约束是结构性约束，不依赖 Agent 的自律。

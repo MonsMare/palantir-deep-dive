@@ -1,0 +1,4 @@
+seed: 20260811
+ingestion_delay_days: 1
+hidden_truth: "_protected/hidden_truth.parquet"
+public_data: "public/"
