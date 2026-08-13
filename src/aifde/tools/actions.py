@@ -228,6 +228,18 @@ class ActionBroker:
         self._idempotency: dict[str, _IdempotencyEntry] = {}
         self._audit_records: list[ActionAuditRecord] = []
 
+    def register_policies(self, policies: Iterable[ActionPolicy]) -> None:
+        """Register additional typed mock Action policies before execution."""
+        for policy in policies:
+            if not isinstance(policy, ActionPolicy):
+                raise TypeError("policies must contain ActionPolicy values")
+            if policy.action_type in self._policies:
+                existing = self._policies[policy.action_type]
+                if existing != policy:
+                    raise ValueError(f"conflicting action policy: {policy.action_type}")
+                continue
+            self._policies[policy.action_type] = policy.model_copy(deep=True)
+
     @property
     def audit_records(self) -> list[ActionAuditRecord]:
         """Return independently validated audit copies."""

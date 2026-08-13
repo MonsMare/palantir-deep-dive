@@ -1,0 +1,55 @@
+stages:
+  - stage_id: project.charter
+    input_artifact_kinds: [ProjectCharter]
+    output_artifact_kinds: [ProjectCharter]
+    hard_gate_ids: [reality.consistency]
+    soft_gate_ids: []
+    approver_role: domain-owner
+  - stage_id: requirements.alignment
+    input_artifact_kinds: [ProjectCharter]
+    output_artifact_kinds: [DecisionContract, RequirementModel]
+    hard_gate_ids: [reality.consistency, evidence.coverage]
+    soft_gate_ids: [business.exception_coverage]
+    approver_role: domain-owner
+  - stage_id: ontology.design
+    input_artifact_kinds: [RequirementModel]
+    output_artifact_kinds: [OntologyModel]
+    hard_gate_ids: [semantic.integrity]
+    soft_gate_ids: []
+    approver_role: domain-owner
+  - stage_id: data_product.build
+    input_artifact_kinds: [OntologyModel]
+    output_artifact_kinds: [DataProduct]
+    hard_gate_ids: [data.quality]
+    soft_gate_ids: []
+    approver_role: domain-owner
+  - stage_id: analytics.snapshot
+    input_artifact_kinds: [DataProduct]
+    output_artifact_kinds: [MetricSnapshot]
+    hard_gate_ids: [executable.readiness]
+    soft_gate_ids: []
+    approver_role: domain-owner
+  - stage_id: prediction.validation
+    input_artifact_kinds: [MetricSnapshot, FeatureCatalog]
+    output_artifact_kinds: [DeliveryPrediction]
+    hard_gate_ids: [data.quality, executable.readiness, adversarial.challenge]
+    soft_gate_ids: []
+    approver_role: domain-owner
+  - stage_id: decision.optimization
+    input_artifact_kinds: [DeliveryPrediction]
+    output_artifact_kinds: [CandidatePlan]
+    hard_gate_ids: [executable.readiness]
+    soft_gate_ids: [business.exception_coverage]
+    approver_role: domain-owner
+  - stage_id: application.acceptance
+    input_artifact_kinds: [CandidatePlan]
+    output_artifact_kinds: [Application, ActionRequest]
+    hard_gate_ids: []
+    soft_gate_ids: [business.exception_coverage]
+    approver_role: domain-owner
+  - stage_id: feedback.operation
+    input_artifact_kinds: [ActionOutcome]
+    output_artifact_kinds: [Feedback]
+    hard_gate_ids: [reality.consistency]
+    soft_gate_ids: []
+    approver_role: domain-owner

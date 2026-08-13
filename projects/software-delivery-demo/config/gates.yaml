@@ -1,0 +1,9 @@
+gates:
+  reality.consistency: hard
+  evidence.coverage: hard
+  semantic.integrity: hard
+  data.quality: hard
+  executable.readiness: hard
+  adversarial.challenge: hard
+  business.exception_coverage: soft
+  release.governance: hard
