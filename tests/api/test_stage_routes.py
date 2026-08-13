@@ -152,7 +152,48 @@ def test_transition_route_returns_409_on_hard_gate_failure(client: TestClient) -
     response = client.post(
         "/stage-runs/run-1/transitions",
         json={"target": "approved", "actor": "builder"},
+        headers={"X-Actor-ID": "builder"},
     )
 
     assert response.status_code == 409
     assert "blocking" in response.json()["detail"].lower()
+
+
+def test_transition_route_rejects_missing_trusted_actor_header(client: TestClient) -> None:
+    response = client.post(
+        "/stage-runs/run-1/transitions",
+        json={"target": "domain_review", "actor": "domain-owner-1"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_transition_route_rejects_actor_header_mismatch(client: TestClient) -> None:
+    response = client.post(
+        "/stage-runs/run-1/transitions",
+        json={"target": "domain_review", "actor": "domain-owner-1"},
+        headers={"X-Actor-ID": "release-owner-1"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_transition_route_rejects_unknown_trusted_actor(client: TestClient) -> None:
+    response = client.post(
+        "/stage-runs/run-1/transitions",
+        json={"target": "domain_review", "actor": "attacker"},
+        headers={"X-Actor-ID": "attacker"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_transition_route_accepts_actor_from_trusted_directory(client: TestClient) -> None:
+    response = client.post(
+        "/stage-runs/run-1/transitions",
+        json={"target": "domain_review", "actor": "domain-owner-1"},
+        headers={"X-Actor-ID": "domain-owner-1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["actor"] == "domain-owner-1"

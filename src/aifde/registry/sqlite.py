@@ -8,6 +8,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
+from threading import RLock
 from types import SimpleNamespace
 from typing import Any, Callable, Iterator, TypeVar
 
@@ -35,7 +36,10 @@ class SQLiteRegistry:
     """A single-database registry with immutable artifact and evidence records."""
 
     def __init__(self, database: str | Path) -> None:
-        self._connection = sqlite3.connect(str(database), isolation_level=None)
+        self._lock = RLock()
+        self._connection = sqlite3.connect(
+            str(database), isolation_level=None, check_same_thread=False
+        )
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._closed = False
@@ -51,72 +55,76 @@ class SQLiteRegistry:
 
     def close(self) -> None:
         """Close the underlying database connection; repeated calls are safe."""
-        if not self._closed:
-            if self._active_transaction is not None:
-                self._active_transaction.rollback()
-            elif self._connection.in_transaction:
-                self._connection.rollback()
-            self._connection.close()
-            self._closed = True
+        with self._lock:
+            if not self._closed:
+                if self._active_transaction is not None:
+                    self._active_transaction.rollback()
+                elif self._connection.in_transaction:
+                    self._connection.rollback()
+                self._connection.close()
+                self._closed = True
 
     def transaction(self) -> _SQLiteRegistryTransaction:
         """Begin an explicit transaction for atomic multi-repository writes."""
-        self._ensure_open()
-        if self._active_transaction is not None or self._connection.in_transaction:
-            raise RuntimeError("a registry transaction is already active")
-        self._connection.execute("BEGIN IMMEDIATE")
-        transaction = _SQLiteRegistryTransaction(self)
-        self._active_transaction = transaction
-        return transaction
+        with self._lock:
+            self._ensure_open()
+            if self._active_transaction is not None or self._connection.in_transaction:
+                raise RuntimeError("a registry transaction is already active")
+            self._connection.execute("BEGIN IMMEDIATE")
+            transaction = _SQLiteRegistryTransaction(self)
+            self._active_transaction = transaction
+            return transaction
 
     def get_project(self, project_id: str) -> SimpleNamespace:
         """Return a minimal read model when any project-scoped record exists."""
-        self._ensure_open()
-        for table in (
-            "artifacts",
-            "artifact_versions",
-            "stage_runs",
-            "gate_runs",
-            "approvals",
-        ):
-            row = self._connection.execute(
-                f"SELECT 1 FROM {table} WHERE project_id = ? LIMIT 1",
-                (project_id,),
-            ).fetchone()
-            if row is not None:
-                return SimpleNamespace(project_id=project_id)
-        raise KeyError(project_id)
+        with self._lock:
+            self._ensure_open()
+            for table in (
+                "artifacts",
+                "artifact_versions",
+                "stage_runs",
+                "gate_runs",
+                "approvals",
+            ):
+                row = self._connection.execute(
+                    f"SELECT 1 FROM {table} WHERE project_id = ? LIMIT 1",
+                    (project_id,),
+                ).fetchone()
+                if row is not None:
+                    return SimpleNamespace(project_id=project_id)
+            raise KeyError(project_id)
 
     def list_artifacts(self, project_id: str) -> list[SimpleNamespace]:
         """Return the latest semantic version of every project artifact."""
-        self._ensure_open()
-        rows = self._connection.execute(
-            """
-            SELECT artifact_id, kind, version, status, content_hash
-            FROM artifact_versions
-            WHERE project_id = ?
-            """,
-            (project_id,),
-        ).fetchall()
-        latest: dict[str, sqlite3.Row] = {}
-        for row in rows:
-            artifact_id = str(row["artifact_id"])
-            current = latest.get(artifact_id)
-            if current is None or semantic_version_key(str(row["version"])) > semantic_version_key(
-                str(current["version"])
-            ):
-                latest[artifact_id] = row
-        return [
-            SimpleNamespace(
-                artifact_id=row["artifact_id"],
-                kind=row["kind"],
-                version=row["version"],
-                status=row["status"],
-                content_hash=row["content_hash"],
-                updated_at=None,
-            )
-            for row in latest.values()
-        ]
+        with self._lock:
+            self._ensure_open()
+            rows = self._connection.execute(
+                """
+                SELECT artifact_id, kind, version, status, content_hash
+                FROM artifact_versions
+                WHERE project_id = ?
+                """,
+                (project_id,),
+            ).fetchall()
+            latest: dict[str, sqlite3.Row] = {}
+            for row in rows:
+                artifact_id = str(row["artifact_id"])
+                current = latest.get(artifact_id)
+                if current is None or semantic_version_key(
+                    str(row["version"])
+                ) > semantic_version_key(str(current["version"])):
+                    latest[artifact_id] = row
+            return [
+                SimpleNamespace(
+                    artifact_id=row["artifact_id"],
+                    kind=row["kind"],
+                    version=row["version"],
+                    status=row["status"],
+                    content_hash=row["content_hash"],
+                    updated_at=None,
+                )
+                for row in latest.values()
+            ]
 
     def list_stages(self, project_id: str) -> list[SimpleNamespace]:
         """Return stage-run payloads as read-only query models."""
@@ -129,41 +137,43 @@ class SQLiteRegistry:
     def _list_payload_models(
         self, table: str, project_id: str
     ) -> list[SimpleNamespace]:
-        self._ensure_open()
-        rows = self._connection.execute(
-            f"SELECT payload_json FROM {table} WHERE project_id = ?",
-            (project_id,),
-        ).fetchall()
-        models: list[SimpleNamespace] = []
-        for row in rows:
-            payload = json.loads(row["payload_json"])
-            if not isinstance(payload, dict):
-                raise ValueError(f"{table} payload_json must contain a JSON object")
-            models.append(SimpleNamespace(**payload))
-        return models
+        with self._lock:
+            self._ensure_open()
+            rows = self._connection.execute(
+                f"SELECT payload_json FROM {table} WHERE project_id = ?",
+                (project_id,),
+            ).fetchall()
+            models: list[SimpleNamespace] = []
+            for row in rows:
+                payload = json.loads(row["payload_json"])
+                if not isinstance(payload, dict):
+                    raise ValueError(f"{table} payload_json must contain a JSON object")
+                models.append(SimpleNamespace(**payload))
+            return models
 
     @contextmanager
     def _write_transaction(self) -> Iterator[None]:
-        self._ensure_open()
-        active_transaction = self._active_transaction
-        if active_transaction is not None:
-            active_transaction._ensure_active()
+        with self._lock:
+            self._ensure_open()
+            active_transaction = self._active_transaction
+            if active_transaction is not None:
+                active_transaction._ensure_active()
+                try:
+                    yield
+                except BaseException:
+                    active_transaction._abort()
+                    raise
+                return
+            if self._connection.in_transaction:
+                raise RuntimeError("registry has an unmanaged active transaction")
+            self._connection.execute("BEGIN IMMEDIATE")
             try:
                 yield
             except BaseException:
-                active_transaction._abort()
+                self._connection.rollback()
                 raise
-            return
-        if self._connection.in_transaction:
-            raise RuntimeError("registry has an unmanaged active transaction")
-        self._connection.execute("BEGIN IMMEDIATE")
-        try:
-            yield
-        except BaseException:
-            self._connection.rollback()
-            raise
-        else:
-            self._connection.commit()
+            else:
+                self._connection.commit()
 
     def _write(self, operation: Callable[[], _T]) -> _T:
         with self._write_transaction():
@@ -269,14 +279,15 @@ class _SQLiteRegistryTransaction:
 
     def commit(self) -> None:
         """Commit once; a failed transaction must be discarded by the caller."""
-        if self._aborted:
-            raise RuntimeError("registry transaction is aborted")
-        if self._complete:
-            raise RuntimeError("registry transaction is already complete")
-        self._ensure_active()
-        self._registry.connection.commit()
-        self._complete = True
-        self._registry._active_transaction = None
+        with self._registry._lock:
+            if self._aborted:
+                raise RuntimeError("registry transaction is aborted")
+            if self._complete:
+                raise RuntimeError("registry transaction is already complete")
+            self._ensure_active()
+            self._registry.connection.commit()
+            self._complete = True
+            self._registry._active_transaction = None
 
     def rollback(self) -> None:
         """Discard all writes and make this transaction unusable."""
@@ -291,14 +302,15 @@ class _SQLiteRegistryTransaction:
             raise RuntimeError("registry transaction is no longer active")
 
     def _abort(self) -> None:
-        if self._complete:
-            return
-        if self._registry.connection.in_transaction:
-            self._registry.connection.rollback()
-        self._aborted = True
-        self._complete = True
-        if self._registry._active_transaction is self:
-            self._registry._active_transaction = None
+        with self._registry._lock:
+            if self._complete:
+                return
+            if self._registry.connection.in_transaction:
+                self._registry.connection.rollback()
+            self._aborted = True
+            self._complete = True
+            if self._registry._active_transaction is self:
+                self._registry._active_transaction = None
 
 
 class _SQLiteArtifactRepository:

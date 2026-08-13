@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field, JsonValue, ValidationError
 
 from aifde.domain.actions import ActionRequest
 from aifde.domain.stages import StageState
 from aifde.gates.engine import TransitionBlocked
+from aifde.policy.capabilities import PolicyEngine
 
 
 def _model_config(extra: str = "ignore") -> dict[str, Any]:
@@ -133,10 +134,21 @@ def build_router(
     gate_engine: Any,
     stage_runner: Any,
     action_broker: Any,
+    policy: PolicyEngine | None = None,
 ) -> APIRouter:
     """Return the route collection backed by the supplied domain services."""
 
     router = APIRouter()
+    trusted_policy = policy or PolicyEngine()
+
+    def resolve_transition_actor(actor: str, actor_header: str | None) -> str:
+        if not actor_header:
+            raise HTTPException(status_code=403, detail="trusted actor header is required")
+        if actor_header != actor:
+            raise HTTPException(status_code=403, detail="actor header does not match request actor")
+        if trusted_policy.actor_binding(actor_header) is None:
+            raise HTTPException(status_code=403, detail="unknown actor")
+        return actor_header
 
     @router.get("/projects/{project_id}/stages", response_model=list[StageSummary])
     def list_project_stages(project_id: str) -> list[StageSummary]:
@@ -209,8 +221,11 @@ def build_router(
 
     @router.post("/stage-runs/{stage_run_id}/transitions", response_model=TransitionResponse)
     def transition_stage_run(
-        stage_run_id: str, payload: TransitionRequest
+        stage_run_id: str,
+        payload: TransitionRequest,
+        actor_header: str | None = Header(default=None, alias="X-Actor-ID"),
     ) -> TransitionResponse:
+        trusted_actor = resolve_transition_actor(payload.actor, actor_header)
         try:
             target = StageState(payload.target)
         except ValueError as exc:
@@ -231,7 +246,7 @@ def build_router(
             )
 
         try:
-            transition = gate_engine.transition(stage_run_id, target, payload.actor)
+            transition = gate_engine.transition(stage_run_id, target, trusted_actor)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="unknown stage run") from exc
         except PermissionError as exc:
@@ -245,7 +260,7 @@ def build_router(
             stage_run_id=_get_attr(transition, "stage_run_id", stage_run_id),
             from_state=_get_attr(transition, "from_state"),
             to_state=_get_attr(transition, "to_state", target.value),
-            actor=_get_attr(transition, "actor", payload.actor),
+            actor=_get_attr(transition, "actor", trusted_actor),
             gate_run_ids=list(_get_attr(transition, "gate_run_ids", []) or []),
         )
 
