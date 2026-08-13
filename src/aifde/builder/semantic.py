@@ -164,6 +164,63 @@ class BuilderContext(_RevalidatingFrozenModel):
         return sha256(payload).hexdigest()
 
 
+class _ContextBindingAuthority:
+    """Issue a process-local proof that a builder context was actually issued.
+
+    A digest alone is only an equality check: a caller can calculate or copy
+    an arbitrary digest and put it on a proposal.  The builder therefore also
+    receives an opaque issuer binding token.  The compiler verifies the token
+    against this private issuer registry.  A production deployment should
+    replace this in-memory authority with a signed, durable context manifest;
+    the important boundary is that the compiler does not trust a caller-made
+    digest string as proof of Builder execution.
+    """
+
+    _bindings: dict[str, str] = {}
+
+    @classmethod
+    def issue(cls, context_digest: str, proposal_values: Mapping[str, Any]) -> str:
+        fingerprint = cls._fingerprint(context_digest, proposal_values)
+        token = sha256(f"aifde-builder-binding:{fingerprint}".encode("utf-8")).hexdigest()
+        cls._bindings[token] = fingerprint
+        return token
+
+    @classmethod
+    def verify(
+        cls,
+        token: str | None,
+        context_digest: str | None,
+        proposal_values: Mapping[str, Any],
+    ) -> bool:
+        if not token or not context_digest:
+            return False
+        return cls._bindings.get(token) == cls._fingerprint(context_digest, proposal_values)
+
+    @staticmethod
+    def _fingerprint(context_digest: str, proposal_values: Mapping[str, Any]) -> str:
+        values = _normalize_binding_value(deepcopy(dict(proposal_values)))
+        values["context_binding"] = None
+        payload = json.dumps(
+            {"context_digest": context_digest, "proposal": values},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _normalize_binding_value(value: Any) -> Any:
+    if isinstance(value, BaseModel):
+        return _normalize_binding_value(value.model_dump(mode="json"))
+    if isinstance(value, Mapping):
+        return {str(key): _normalize_binding_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_normalize_binding_value(item) for item in value]
+    if hasattr(value, "value") and not isinstance(value, (str, bytes, int, float, bool)):
+        return _normalize_binding_value(value.value)
+    return value
+
+
 class TermCandidate(_RevalidatingFrozenModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -399,6 +456,7 @@ class CandidateProposal(_RevalidatingFrozenModel):
     evidence_refs: tuple[str, ...] = ()
     proposal_version: str = "semantic-candidate-v1"
     context_digest: str | None = None
+    context_binding: str | None = None
     release_eligibility: ReleaseEligibility = "review_required"
 
     @field_validator("proposal_version")
@@ -410,6 +468,17 @@ class CandidateProposal(_RevalidatingFrozenModel):
     @classmethod
     def validate_context_digest(cls, value: str | None) -> str | None:
         return None if value is None else _nonblank(value, "context_digest")
+
+    @field_validator("context_binding")
+    @classmethod
+    def validate_context_binding(cls, value: str | None) -> str | None:
+        return None if value is None else _nonblank(value, "context_binding")
+
+    @model_validator(mode="after")
+    def validate_context_binding_pair(self) -> Self:
+        if self.context_binding is not None and self.context_digest is None:
+            raise ValueError("context_binding requires context_digest")
+        return self
 
     @field_validator("warnings")
     @classmethod
@@ -513,7 +582,7 @@ class DeterministicCandidateProvider:
             value="unknown",
             release_status="unreleased",
         )
-        return CandidateProposal(
+        candidate = CandidateProposal(
             terms=tuple(sorted(terms.values(), key=lambda item: item.term_id)),
             entities=tuple(sorted(entities.values(), key=lambda item: item.candidate_id)),
             assertions=tuple(sorted(assertions.values(), key=lambda item: item.assertion_id)),
@@ -562,6 +631,9 @@ class DeterministicCandidateProvider:
                 ),
             }
         )
+        # The provider may propose a context digest for traceability, but only
+        # SemanticCandidateBuilder issues the compiler-accepted binding proof.
+        return candidate
 
     def _extract_purchase_order(
         self,
@@ -920,7 +992,7 @@ class SemanticCandidateBuilder:
             )
             for item in proposal.mappings
         )
-        return CandidateProposal(
+        candidate = CandidateProposal(
             terms=terms,
             entities=entities,
             entity_matches=matches,
@@ -930,8 +1002,13 @@ class SemanticCandidateBuilder:
             evidence_refs=proposal.evidence_refs,
             proposal_version=proposal.proposal_version,
             context_digest=context.digest,
+            context_binding=None,
             release_eligibility=proposal.release_eligibility,
         )
+        binding = _ContextBindingAuthority.issue(
+            context.digest, candidate.model_dump(mode="python")
+        )
+        return candidate.model_copy(update={"context_binding": binding})
 
     @staticmethod
     def _validate_assertions(

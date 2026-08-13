@@ -8,6 +8,8 @@ from .compiler import (
     MappingSpec,
     OntologyCandidate,
 )
+from .flow import BuilderRunConfig, BuilderRunResult, EvidenceDrivenOntologyBuilder
+from .gates import BuilderGateReport, BuilderGateRunner, OntologyReleasePackage
 from .sources import SourceRegistry
 
 __all__ = [
@@ -20,4 +22,10 @@ __all__ = [
     "SourceAsset",
     "SourceRegistry",
     "SourceSnapshot",
+    "BuilderGateReport",
+    "BuilderGateRunner",
+    "BuilderRunConfig",
+    "BuilderRunResult",
+    "EvidenceDrivenOntologyBuilder",
+    "OntologyReleasePackage",
 ]

@@ -17,6 +17,7 @@ ex:promisedDeliveryDate a rdf:Property ; rdfs:domain ex:PurchaseOrder .
 ex:actualDeliveryDate a rdf:Property ; rdfs:domain ex:DeliveryEvent .
 ex:delayState a rdf:Property ; rdfs:domain ex:DeliveryException .
 ex:eventTime a rdf:Property ; rdfs:domain ex:DeliveryEvent .
+ex:forPurchaseOrder a rdf:Property ; rdfs:domain ex:DeliveryEvent ; rdfs:range ex:PurchaseOrder .
 ex:hasSupplier a rdf:Property ; rdfs:domain ex:PurchaseOrder ; rdfs:range ex:Supplier .
 ex:hasDeliveryEvent a rdf:Property ; rdfs:domain ex:PurchaseOrder ; rdfs:range ex:DeliveryEvent .
 ex:affects a rdf:Property ; rdfs:domain ex:DeliveryException ; rdfs:range ex:PurchaseOrder .

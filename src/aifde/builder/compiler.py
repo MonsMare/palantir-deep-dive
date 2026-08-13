@@ -8,11 +8,16 @@ from datetime import datetime
 from hashlib import sha256
 import json
 from typing import Any
+from uuid import uuid4
 
 from aifde.tools.validation import ShaclValidator
 
 from .contracts import EvidenceFragment, SourceSnapshot
-from .semantic import CandidateProposal, MappingCandidate
+from .semantic import (
+    CandidateProposal,
+    MappingCandidate,
+    _ContextBindingAuthority,
+)
 from .sources import SourceRegistry
 
 
@@ -64,6 +69,16 @@ def _parse_datetime(value: Any, name: str) -> datetime:
     if result.tzinfo is None or result.utcoffset() is None:
         raise ValueError(f"{name} must be timezone-aware")
     return result
+
+
+def _safe_local_name(value: str) -> str:
+    normalized = "".join(char.lower() if char.isalnum() else "-" for char in value)
+    normalized = "-".join(part for part in normalized.split("-") if part)
+    return normalized or "unknown"
+
+
+def _escape_literal(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
 @dataclass(frozen=True)
@@ -145,11 +160,30 @@ class CompileResult:
     artifact_hashes: dict[str, str]
     ontology_turtle: str
     shapes_turtle: str
+    data_turtle: str = ""
+    proposal_evidence_refs: tuple[str, ...] = ()
     source_field_paths: tuple[str, ...] = ()
+    artifact_manifest_id: str = ""
 
 
 def _rdfs_shape_validation(ontology_turtle: str, shapes_turtle: str) -> Any:
     return ShaclValidator().validate(ontology_turtle, shapes_turtle)
+
+
+class _ArtifactManifestAuthority:
+    """Keep a compiler-issued manifest outside the mutable result object."""
+
+    _manifests: dict[str, dict[str, str]] = {}
+
+    @classmethod
+    def issue(cls, hashes: Mapping[str, str]) -> str:
+        manifest_id = f"manifest:{uuid4()}"
+        cls._manifests[manifest_id] = dict(hashes)
+        return manifest_id
+
+    @classmethod
+    def verify(cls, manifest_id: str, hashes: Mapping[str, str]) -> bool:
+        return bool(manifest_id and cls._manifests.get(manifest_id) == dict(hashes))
 
 
 class MappingCompiler:
@@ -172,13 +206,26 @@ class MappingCompiler:
             raise ValueError("proposal requires evidence refs before compilation")
         if not proposal.mappings:
             raise ValueError("proposal requires executable mappings before compilation")
+        if not _ContextBindingAuthority.verify(
+            proposal.context_binding,
+            proposal.context_digest,
+            proposal.model_dump(mode="python"),
+        ):
+            raise ValueError("proposal must carry a valid bound Builder context")
         if proposal.context_digest is None or any(
             item.context_digest != proposal.context_digest
-            for item in (*proposal.assertions, *proposal.mappings)
+            for item in (
+                *proposal.terms,
+                *proposal.entities,
+                *proposal.entity_matches,
+                *proposal.assertions,
+                *proposal.mappings,
+            )
         ):
-            raise ValueError("proposal must be bound context before compilation")
+            raise ValueError("proposal children must share the bound Builder context")
 
         fragments = self._load_fragments(proposal, source_registry)
+        self._validate_proposal_evidence_closure(proposal, fragments)
         mapping_specs = tuple(
             self._mapping_spec(item, fragments, proposal.evidence_refs, version)
             for item in proposal.mappings
@@ -189,6 +236,7 @@ class MappingCompiler:
         ontology_candidate = self._ontology_candidate(proposal, mapping_specs, version)
         ontology_turtle = self.render_turtle(ontology_candidate)
         shapes_turtle = self.render_shapes(ontology_candidate)
+        data_turtle = self.render_data(canonical_rows)
         validation = CompileValidation(passed=False, evidence_refs=tuple(proposal.evidence_refs))
         result = CompileResult(
             ontology_candidate=ontology_candidate,
@@ -202,11 +250,15 @@ class MappingCompiler:
                 "mappings": _hash_json([self._mapping_dict(item) for item in mapping_specs]),
                 "canonical_product": _hash_json(canonical_rows),
                 "provenance": _hash_json(provenance_rows),
+                "canonical_rdf": _hash_text(data_turtle),
             },
             ontology_turtle=ontology_turtle,
             shapes_turtle=shapes_turtle,
+            data_turtle=data_turtle,
+            proposal_evidence_refs=tuple(proposal.evidence_refs),
             source_field_paths=tuple(sorted({item.source_field_path for item in mapping_specs})),
         )
+        result.artifact_manifest_id = _ArtifactManifestAuthority.issue(result.artifact_hashes)
         validation = self.validate(result)
         result.validation_report = validation
         return result
@@ -228,31 +280,18 @@ class MappingCompiler:
             orders = payload.get("purchase_orders") if isinstance(payload, dict) else None
             if not isinstance(orders, list):
                 continue
-            if mapping_spec.source_field_path.endswith(".supplier") and any(
-                not isinstance(order, dict) or "supplier" not in order for order in orders
-            ):
-                raise ValueError("source field path $.purchase_orders[*].supplier is not resolvable")
-            if mapping_spec.source_field_path.endswith(".promised_date") and any(
-                not isinstance(order, dict) or "promised_date" not in order for order in orders
-            ):
-                raise ValueError(
-                    "source field path $.purchase_orders[*].promised_date is not resolvable"
-                )
             for order in orders:
                 if not isinstance(order, dict):
                     raise ValueError("purchase_orders must contain objects")
-                if mapping_spec.target_field not in {
-                    "supplier_id",
-                    "promised_delivery_date",
-                }:
-                    raise ValueError(f"unsupported target field {mapping_spec.target_field!r}")
                 po_id = _nonblank(str(order.get("po_id", "")), "po_id")
+                value = self._extract_mapping_value(order, mapping_spec)
+                supplier = _nonblank(str(order.get("supplier", "")), "supplier")
                 promised = _nonblank(str(order.get("promised_date", "")), "promised_date")
                 rows.append(
                     {
                         "purchase_order_id": po_id,
-                        "supplier_id": str(order.get("supplier", "")),
-                        "promised_delivery_date": promised,
+                        "supplier_id": value if mapping_spec.target_field == "supplier_id" else supplier,
+                        "promised_delivery_date": value if mapping_spec.target_field == "promised_delivery_date" else promised,
                         "event_time": promised,
                         "observed_at": _iso(snapshot.observed_at),
                         "available_at": _iso(snapshot.available_at),
@@ -260,6 +299,48 @@ class MappingCompiler:
                     }
                 )
         return rows
+
+    @staticmethod
+    def render_data(canonical_rows: Sequence[Mapping[str, Any]]) -> str:
+        """Render canonical product instances for non-vacuous SHACL validation."""
+
+        lines = [
+            "@prefix ex: <urn:aifde:supplier-delay:> .",
+            "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .",
+            "",
+        ]
+        suppliers: set[str] = set()
+        for row in canonical_rows:
+            po_id = _nonblank(str(row.get("purchase_order_id", "")), "purchase_order_id")
+            supplier_id = _nonblank(str(row.get("supplier_id", "")), "supplier_id")
+            supplier_slug = _safe_local_name(supplier_id)
+            suppliers.add(supplier_slug + "\t" + supplier_id)
+            actual_date = row.get("actual_delivery_date")
+            event_link = (
+                f' ; ex:hasDeliveryEvent ex:event-{_safe_local_name(po_id)}'
+                if actual_date
+                else ""
+            )
+            lines.append(
+                f'ex:po-{_safe_local_name(po_id)} a ex:PurchaseOrder ; '
+                f'ex:purchaseOrderId "{_escape_literal(po_id)}" ; '
+                f'ex:promisedDeliveryDate "{_escape_literal(str(row.get("promised_delivery_date", "")))}" ; '
+                f'ex:hasSupplier ex:supplier-{supplier_slug}{event_link} .'
+            )
+            if actual_date:
+                lines.append(
+                    f'ex:event-{_safe_local_name(po_id)} a ex:DeliveryEvent ; '
+                    f'ex:actualDeliveryDate "{_escape_literal(str(actual_date))}" ; '
+                    f'ex:eventTime "{_escape_literal(str(actual_date))}" ; '
+                    f'ex:forPurchaseOrder ex:po-{_safe_local_name(po_id)} .'
+                )
+        for entry in sorted(suppliers):
+            supplier_slug, supplier_id = entry.split("\t", 1)
+            lines.append(
+                f'ex:supplier-{supplier_slug} a ex:Supplier ; '
+                f'ex:supplierId "{_escape_literal(supplier_id)}" .'
+            )
+        return "\n".join(lines) + "\n"
 
     @staticmethod
     def render_turtle(ontology_candidate: OntologyCandidate) -> str:
@@ -299,31 +380,53 @@ class MappingCompiler:
 
     @staticmethod
     def render_shapes(ontology_candidate: OntologyCandidate) -> str:
-        del ontology_candidate
-        return "\n".join(
+        classes = set(ontology_candidate.classes)
+        lines = [
+            "@prefix ex: <urn:aifde:supplier-delay:> .",
+            "@prefix sh: <http://www.w3.org/ns/shacl#> .",
+            "",
+        ]
+        if "PurchaseOrder" in classes:
+            lines.extend(
             [
-                "@prefix ex: <urn:aifde:supplier-delay:> .",
-                "@prefix sh: <http://www.w3.org/ns/shacl#> .",
-                "",
                 "ex:PurchaseOrderShape a sh:NodeShape ;",
                 "    sh:targetClass ex:PurchaseOrder ;",
                 '    sh:property [ sh:path ex:purchaseOrderId ; sh:minCount 1 ; sh:message "PurchaseOrder requires purchaseOrderId." ] ;',
                 '    sh:property [ sh:path ex:promisedDeliveryDate ; sh:minCount 1 ; sh:message "PurchaseOrder requires promisedDeliveryDate." ] .',
-                "",
+            ]
+            )
+        if "Supplier" in classes:
+            lines.extend(
+            [
                 "ex:SupplierShape a sh:NodeShape ;",
                 "    sh:targetClass ex:Supplier ;",
                 '    sh:property [ sh:path ex:supplierId ; sh:minCount 1 ; sh:message "Supplier requires supplierId." ] .',
-                "",
+            ]
+            )
+        if "DeliveryEvent" in classes:
+            lines.extend(
+            [
                 "ex:DeliveryEventShape a sh:NodeShape ;",
                 "    sh:targetClass ex:DeliveryEvent ;",
                 '    sh:property [ sh:path ex:eventTime ; sh:minCount 1 ; sh:message "DeliveryEvent requires eventTime." ] .',
             ]
-        ) + "\n"
+            )
+        return "\n".join(lines) + "\n"
 
     def validate(self, result: CompileResult) -> CompileValidation:
         if not isinstance(result, CompileResult):
             raise TypeError("result must be a CompileResult")
         violations: list[str] = []
+        if not _ArtifactManifestAuthority.verify(
+            result.artifact_manifest_id, result.artifact_hashes
+        ):
+            violations.append("artifact manifest is missing or does not match compiler-issued hashes")
+        if not result.proposal_evidence_refs:
+            violations.append("compile result requires proposal evidence refs")
+        known_evidence = set(result.proposal_evidence_refs)
+        known_mappings = {item.mapping_id for item in result.mapping_specs}
+        if len(known_mappings) != len(result.mapping_specs):
+            violations.append("mapping ids must be unique")
         for mapping in result.mapping_specs:
             try:
                 self._validate_mapping_spec(mapping, _EXPECTED_SOURCE_PATHS)
@@ -345,6 +448,20 @@ class MappingCompiler:
                 violations.append(f"canonical row {po_id!r} requires promised_delivery_date")
             if not row.get("evidence_refs"):
                 violations.append(f"canonical row {po_id!r} requires evidence_refs")
+            elif not set(row["evidence_refs"]).issubset(known_evidence):
+                violations.append(f"canonical row {po_id!r} references unknown evidence")
+            if row.get("mapping_ids") and not set(row["mapping_ids"]).issubset(known_mappings):
+                violations.append(f"canonical row {po_id!r} references unknown mappings")
+            try:
+                event_time = str(row.get("event_time", ""))
+                if not event_time or len(event_time) < 10:
+                    raise ValueError
+                datetime.fromisoformat(event_time)
+                promised = str(row.get("promised_delivery_date", ""))
+                if event_time[:10] != promised[:10]:
+                    violations.append(f"canonical row {po_id!r} event_time disagrees with promised date")
+            except ValueError:
+                violations.append(f"canonical row {po_id!r} event_time must be an ISO date or datetime")
             try:
                 observed = _parse_datetime(row.get("observed_at"), "observed_at")
                 available = _parse_datetime(row.get("available_at"), "available_at")
@@ -354,21 +471,48 @@ class MappingCompiler:
                 violations.append(str(exc))
         row_ids = {str(row.get("purchase_order_id")) for row in result.canonical_rows}
         provenance_by_id = {str(item.get("target_id")): item for item in result.provenance_rows}
+        if len(provenance_by_id) != len(result.provenance_rows):
+            violations.append("provenance target ids must be unique")
+        mapping_row_counts = {mapping_id: 0 for mapping_id in known_mappings}
         for target_id in sorted(row_ids):
             provenance = provenance_by_id.get(target_id)
             if provenance is None or not provenance.get("evidence_refs"):
                 violations.append(f"missing provenance for target {target_id!r}")
+                continue
+            row = next(item for item in result.canonical_rows if str(item.get("purchase_order_id")) == target_id)
+            if set(provenance.get("evidence_refs", ())) != set(row.get("evidence_refs", ())):
+                violations.append(f"provenance evidence does not match row {target_id!r}")
+            if set(provenance.get("mapping_ids", ())) != set(row.get("mapping_ids", ())):
+                violations.append(f"provenance mappings do not match row {target_id!r}")
+            if not set(provenance.get("evidence_refs", ())).issubset(known_evidence):
+                violations.append(f"provenance for {target_id!r} references unknown evidence")
+            if not set(provenance.get("mapping_ids", ())).issubset(known_mappings):
+                violations.append(f"provenance for {target_id!r} references unknown mappings")
+            for mapping_id in provenance.get("mapping_ids", ()):
+                if mapping_id in mapping_row_counts:
+                    mapping_row_counts[mapping_id] += 1
         for row in result.canonical_rows:
             if not row.get("mapping_ids"):
                 violations.append(
                     f"canonical row {row.get('purchase_order_id', '')!r} requires mapping_ids"
                 )
+            if row.get("actual_delivery_date"):
+                try:
+                    datetime.fromisoformat(str(row["actual_delivery_date"]))
+                except ValueError:
+                    violations.append(
+                        f"canonical row {row.get('purchase_order_id', '')!r} actual_delivery_date must be an ISO date"
+                    )
+        for mapping_id, count in mapping_row_counts.items():
+            if count == 0:
+                violations.append(f"mapping {mapping_id!r} produced no canonical row")
         expected_hashes = {
             "ontology": _hash_text(result.ontology_turtle),
             "shapes": _hash_text(result.shapes_turtle),
             "mappings": _hash_json([self._mapping_dict(item) for item in result.mapping_specs]),
             "canonical_product": _hash_json(result.canonical_rows),
             "provenance": _hash_json(result.provenance_rows),
+            "canonical_rdf": _hash_text(result.data_turtle),
         }
         for artifact_id, expected in expected_hashes.items():
             if result.artifact_hashes.get(artifact_id) != expected:
@@ -376,7 +520,9 @@ class MappingCompiler:
         violations = list(dict.fromkeys(violations))
         if violations:
             raise ValueError("compiler validation failed: " + "; ".join(violations))
-        semantic_report = _rdfs_shape_validation(result.ontology_turtle, result.shapes_turtle)
+        if not result.canonical_rows:
+            raise ValueError("compiler validation failed: canonical product is empty")
+        semantic_report = _rdfs_shape_validation(result.data_turtle, result.shapes_turtle)
         if not semantic_report.passed:
             raise ValueError("SHACL validation failed: " + "; ".join(semantic_report.violations))
         return CompileValidation(
@@ -402,6 +548,32 @@ class MappingCompiler:
             missing = sorted(requested - set(fragments))
             raise ValueError("proposal references unavailable evidence: " + ", ".join(missing))
         return fragments
+
+    @staticmethod
+    def _validate_proposal_evidence_closure(
+        proposal: CandidateProposal, fragments: Mapping[str, EvidenceFragment]
+    ) -> None:
+        proposal_refs = set(proposal.evidence_refs)
+        if set(fragments) != proposal_refs:
+            raise ValueError("compiler evidence snapshot is not closed over proposal evidence")
+        children = (
+            *proposal.terms,
+            *proposal.entities,
+            *proposal.assertions,
+            *proposal.mappings,
+        )
+        for child in children:
+            refs = set(getattr(child, "source_evidence_refs", ())) | set(
+                getattr(child, "evidence_refs", ())
+            )
+            if not refs.issubset(proposal_refs):
+                raise ValueError("proposal child references evidence outside proposal closure")
+        if any(
+            item.status in {"confirmed", "probable_match"}
+            and not item.candidate_id
+            for item in proposal.entity_matches
+        ):
+            raise ValueError("resolved entity match requires candidate identity")
 
     def _mapping_spec(
         self,
@@ -432,6 +604,34 @@ class MappingCompiler:
             security_policy=f"source-policy:{first.source_asset_id}",
             version=version,
         )
+
+    @staticmethod
+    def _extract_mapping_value(order: Mapping[str, Any], mapping: MappingSpec) -> str:
+        path_to_field = {
+            "$.purchase_orders[*].supplier": "supplier",
+            "$.purchase_orders[*].promised_date": "promised_date",
+        }
+        source_field = path_to_field.get(mapping.source_field_path)
+        if source_field is None:
+            raise ValueError(f"source field path {mapping.source_field_path!r} is not executable")
+        expected_target = {
+            "supplier": "supplier_id",
+            "promised_date": "promised_delivery_date",
+        }[source_field]
+        if mapping.target_field != expected_target:
+            raise ValueError(
+                f"mapping {mapping.mapping_id!r} maps {source_field!r} to invalid target field "
+                f"{mapping.target_field!r}"
+            )
+        if mapping.transform_expression not in {"identity", "trim"}:
+            raise ValueError(f"unsupported transform expression {mapping.transform_expression!r}")
+        value = order.get(source_field)
+        if value is None:
+            if mapping.null_policy == "reject":
+                raise ValueError(f"mapping {mapping.mapping_id!r} rejects null {source_field!r}")
+            return ""
+        normalized = str(value).strip() if mapping.transform_expression == "trim" else str(value)
+        return _nonblank(normalized, source_field)
 
     def _materialize_rows(
         self,
@@ -468,13 +668,25 @@ class MappingCompiler:
             ).replace(" ", "")
             supplier_id = entity_map.get(candidate_supplier_id, candidate_supplier_id)
             mapping_ids = [item.mapping_id for item in mapping_by_ref.get(ref, [])]
+            mapped_values = {
+                item.target_field: self._extract_mapping_value(payload, item)
+                for item in mapping_by_ref.get(ref, [])
+            }
+            supplier_value = mapped_values.get("supplier_id", supplier_name)
+            promised_value = mapped_values.get("promised_delivery_date", promised)
             row = rows_by_id.setdefault(
                 po_id,
                 {
                     "purchase_order_id": po_id,
-                    "supplier_id": supplier_id,
-                    "promised_delivery_date": promised,
-                    "event_time": promised,
+                    "supplier_id": entity_map.get(
+                        "supplier:" + "".join(
+                            char.lower() if char.isalnum() else " "
+                            for char in supplier_value
+                        ).replace(" ", ""),
+                        supplier_id,
+                    ),
+                    "promised_delivery_date": promised_value,
+                    "event_time": promised_value,
                     "observed_at": _iso(fragment.observed_at),
                     "available_at": _iso(fragment.available_at),
                     "target_grain": TARGET_GRAIN,
@@ -486,6 +698,25 @@ class MappingCompiler:
             row["mapping_ids"] = list(dict.fromkeys([*row["mapping_ids"], *mapping_ids]))
             if _parse_datetime(fragment.observed_at, "observed_at") > _parse_datetime(fragment.available_at, "available_at"):
                 raise ValueError(f"canonical row {po_id!r} available_at precedes observed_at")
+        rows = [rows_by_id[key] for key in sorted(rows_by_id)]
+        # Only an explicitly evidenced actual-delivery fact may add an actual
+        # date.  The provider's assumption remains an open question.
+        rows_by_id = {row["purchase_order_id"]: row for row in rows}
+        for assertion in proposal.assertions:
+            if (
+                assertion.assertion_type != "fact"
+                or assertion.predicate != "actualDeliveryDate"
+                or not assertion.subject.startswith("purchase-order:")
+            ):
+                continue
+            target_id = assertion.subject.split(":", 1)[1]
+            row = rows_by_id.get(target_id)
+            if row is None:
+                continue
+            row["actual_delivery_date"] = _nonblank(str(assertion.value), "actualDeliveryDate")
+            row["evidence_refs"] = list(
+                dict.fromkeys([*row["evidence_refs"], *assertion.evidence_refs])
+            )
         rows = [rows_by_id[key] for key in sorted(rows_by_id)]
         provenance_rows = [
             {
@@ -499,6 +730,9 @@ class MappingCompiler:
                         "source_version": item.source_version,
                         "snapshot_id": item.snapshot_id,
                         "locator": item.locator,
+                        "observed_at": _iso(item.observed_at),
+                        "available_at": _iso(item.available_at),
+                        "event_time": _iso(item.event_time) if item.event_time else None,
                     }
                     for ref in row["evidence_refs"]
                     for item in [fragments[ref]]
@@ -526,6 +760,7 @@ class MappingCompiler:
                 "actualDeliveryDate",
                 "delayState",
                 "eventTime",
+                "forPurchaseOrder",
             ),
             relationships=(
                 ("PurchaseOrder", "hasSupplier", "Supplier"),
@@ -588,6 +823,18 @@ class MappingCompiler:
             raise ValueError(f"source field path {mapping.source_field_path!r} is not resolvable")
         if mapping.target_field not in {"supplier_id", "promised_delivery_date"}:
             raise ValueError(f"mapping target field {mapping.target_field!r} is not supported")
+        expected_target = {
+            "$.purchase_orders[*].supplier": "supplier_id",
+            "$.purchase_orders[*].promised_date": "promised_delivery_date",
+        }[mapping.source_field_path]
+        if mapping.target_field != expected_target:
+            raise ValueError(
+                f"mapping {mapping.mapping_id!r} target field does not match source field path"
+            )
+        if mapping.transform_expression not in {"identity", "trim"}:
+            raise ValueError(f"unsupported transform expression {mapping.transform_expression!r}")
+        if mapping.time_semantics not in {"observed_at/available_at", "valid_time"}:
+            raise ValueError(f"unsupported time semantics {mapping.time_semantics!r}")
 
 
 __all__ = [

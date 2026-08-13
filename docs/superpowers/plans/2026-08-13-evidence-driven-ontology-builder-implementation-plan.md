@@ -43,7 +43,7 @@
 - `SourceRegistry.get_fragment(fragment_id) -> EvidenceFragment`
 - `SourceRegistry.list_fragments(snapshot_id=None) -> list[EvidenceFragment]`
 
-- [ ] **Step 1: Write failing tests for immutable source and evidence contracts**
+- [x] **Step 1: Write failing tests for immutable source and evidence contracts**
 
 ```python
 def test_snapshot_hash_and_fragment_locator_are_stable(registry):
@@ -70,21 +70,21 @@ def test_source_snapshot_is_append_only(registry):
     assert registry.get_snapshot(first.snapshot_id).content_hash == sha256(b"one").hexdigest()
 ```
 
-- [ ] **Step 2: Run the focused tests and verify the expected missing-module failure**
+- [x] **Step 2: Run the focused tests and verify the expected missing-module failure**
 
 Run: `pytest tests/builder/test_source_registry.py -q`
 
 Expected: collection fails because `aifde.builder` does not exist.
 
-- [ ] **Step 3: Implement the minimal immutable contracts and in-memory registry**
+- [x] **Step 3: Implement the minimal immutable contracts and in-memory registry**
 
 Use Pydantic frozen models for source snapshots and evidence. Canonicalize bytes before hashing, reject naive datetimes, reject blank IDs/locators, and reject duplicate `(source_asset_id, version)` captures with a different content hash. Store original and normalized evidence text together; `list_fragments` must return defensive copies.
 
-- [ ] **Step 4: Add the overlapping supplier fixtures and test deterministic capture**
+- [x] **Step 4: Add the overlapping supplier fixtures and test deterministic capture**
 
 The JSON fixture must contain purchase orders and promised dates. The Markdown fixture must repeat the same supplier under a display-name variant and contain a note that a promised date changed. Tests must show both fragments point to their original source locations.
 
-- [ ] **Step 5: Run focused and baseline tests, then commit**
+- [x] **Step 5: Run focused and baseline tests, then commit**
 
 Run: `pytest tests/builder/test_source_registry.py -q`
 
@@ -237,7 +237,7 @@ Commit: `feat: compile ontology and executable mappings`
 - `BuilderGateRunner.release(result, approval_actor) -> OntologyReleasePackage`
 - `run_supplier_delay_builder_demo(project_root) -> BuilderRunResult`
 
-- [ ] **Step 1: Write failing end-to-end tests for release and blocking paths**
+- [x] **Step 1: Write failing end-to-end tests for release and blocking paths**
 
 ```python
 def test_supplier_delay_builder_releases_traceable_ontology(project_root):
@@ -263,25 +263,25 @@ def test_released_package_contains_rollback_and_dependency_hashes(project_root):
     assert result.release_package.mapping_artifact_hash
 ```
 
-- [ ] **Step 2: Run the focused end-to-end tests and verify they fail**
+- [x] **Step 2: Run the focused end-to-end tests and verify they fail**
 
 Run: `pytest tests/builder/test_builder_flow.py -q`
 
 Expected: import failure because Builder flow and demo are absent.
 
-- [ ] **Step 3: Implement builder orchestration and deterministic gate report**
+- [x] **Step 3: Implement builder orchestration and deterministic gate report**
 
 The flow is `register source -> capture snapshots -> slice evidence -> propose candidates -> resolve entities -> compile -> validate -> gate -> human approval -> release package`. Hard gates cover source/evidence integrity, semantic integrity, executable mapping, temporal safety, provenance completeness, and high-impact conflict handling. The Builder may produce a proposal and validation report but must not self-approve.
 
-- [ ] **Step 4: Connect to the existing Gate Engine without bypassing it**
+- [x] **Step 4: Connect to the existing Gate Engine without bypassing it**
 
-Register a `StageRun` for `ontology.builder`, use the existing validation context and transition service, and record gate results as immutable snapshots. The release helper must require an explicit approval actor and must reject a Builder actor as approver.
+Register a `StageRun` for `ontology.design`, use the existing validation context and transition service, and record gate results as immutable snapshots. The release helper must require an explicit approval actor and must reject a Builder actor as approver.
 
-- [ ] **Step 5: Add the supplier-delay simulated scenario and operator README**
+- [x] **Step 5: Add the supplier-delay simulated scenario and operator README**
 
 The fixture contains at least three purchase orders, two representations of the same supplier, one promised-date revision, an actual delivery event, and a note that is available one day after the event. The README explains how to run the demo, where evidence/provenance lives, what is released, and how the blocked conflict case differs.
 
-- [ ] **Step 6: Run focused tests, complete full regression, and commit**
+- [x] **Step 6: Run focused tests, complete full regression, and commit**
 
 Run: `pytest tests/builder -q` and then `pytest -q`.
 
@@ -291,11 +291,11 @@ Commit: `feat: run gated evidence-driven ontology builder`
 
 ## Completion audit
 
-- [ ] Every source snapshot and evidence fragment is immutable, hashed, located, and time-aware.
-- [ ] Every released semantic fact and mapping is evidence-bound.
-- [ ] Entity merges retain score, threshold, fields, algorithm version, conflict refs, and review state.
-- [ ] Mapping execution produces canonical product rows and provenance rows.
-- [ ] Ontology and SHACL artifacts are rendered and validated.
-- [ ] Hard gate failure blocks release and the Builder cannot approve itself.
-- [ ] The supplier-delay demo releases the clean case and blocks the unresolved conflict case.
-- [ ] The full existing AI-FDE Builder and software-delivery demo regression remains green.
+- [x] Every source snapshot and evidence fragment is immutable, hashed, located, and time-aware.
+- [x] Every released semantic fact and mapping is evidence-bound.
+- [x] Entity merges retain score, threshold, fields, algorithm version, conflict refs, and review state.
+- [x] Mapping execution produces canonical product rows and provenance rows.
+- [x] Ontology and SHACL artifacts are rendered and validated.
+- [x] Hard gate failure blocks release and the Builder cannot approve itself.
+- [x] The supplier-delay demo releases the clean case and blocks the unresolved conflict case.
+- [x] The full existing AI-FDE Builder and software-delivery demo regression remains green.

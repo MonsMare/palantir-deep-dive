@@ -173,7 +173,24 @@ def test_compiler_rejects_unresolvable_source_path(compiled: CompileResult):
         MappingCompiler().validate(replace(compiled, mapping_specs=[broken]))
 
 
-def test_compile_rejects_unresolvable_source_path(compiled: CompileResult):
+def test_compile_rejects_tampered_proposal_binding(compiled: CompileResult):
+    registry, fragments = supplier_fragments()
+    context = BuilderContext(
+        project_id="supplier-ontology",
+        domain="procurement",
+        ontology_version="v1",
+        known_terms=("supplier", "purchase order", "promised date"),
+    )
+    proposal = SemanticCandidateBuilder(DeterministicCandidateProvider()).build(
+        fragments, context
+    )
+    broken_proposal = proposal.model_copy(update={"context_binding": "forged-binding"})
+
+    with pytest.raises(ValueError, match="bound Builder context"):
+        MappingCompiler().compile(broken_proposal, registry, version="0.1.0")
+
+
+def test_compile_rejects_mapping_mutation_even_with_original_proposal(compiled: CompileResult):
     registry, fragments = supplier_fragments()
     context = BuilderContext(
         project_id="supplier-ontology",
@@ -190,7 +207,7 @@ def test_compile_rejects_unresolvable_source_path(compiled: CompileResult):
     )
     broken_proposal = proposal.model_copy(update={"mappings": broken_mappings})
 
-    with pytest.raises(ValueError, match="source field path"):
+    with pytest.raises(ValueError, match="bound Builder context"):
         MappingCompiler().compile(broken_proposal, registry, version="0.1.0")
 
 
@@ -238,7 +255,7 @@ def test_compiler_rejects_unbound_draft_proposal():
         ),
     )
 
-    with pytest.raises(ValueError, match="bound context"):
+    with pytest.raises(ValueError, match="bound Builder context|bound context|context binding"):
         MappingCompiler().compile(draft, SourceRegistry(), version="0.1.0")
 
 
@@ -251,4 +268,18 @@ def test_tampered_artifact_hash_is_rejected(compiled: CompileResult):
     broken = replace(compiled, ontology_turtle=compiled.ontology_turtle + "\n# tampered")
 
     with pytest.raises(ValueError, match="artifact hash"):
+        MappingCompiler().validate(broken)
+
+
+def test_compiler_rejects_artifact_and_hash_replacement(compiled: CompileResult):
+    broken = replace(
+        compiled,
+        ontology_turtle=compiled.ontology_turtle + "\n# forged",
+        artifact_hashes={
+            **compiled.artifact_hashes,
+            "ontology": "0" * 64,
+        },
+    )
+
+    with pytest.raises(ValueError, match="artifact manifest"):
         MappingCompiler().validate(broken)
