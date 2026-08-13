@@ -1,0 +1,22 @@
+@prefix ex: <urn:aifde:supplier-delay:> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+ex:ontology a ex:Ontology ;
+    ex:version "0.1.0" ;
+    ex:sourceRef "simulated-supplier-delay-fixture" .
+
+ex:Supplier a rdfs:Class .
+ex:PurchaseOrder a rdfs:Class .
+ex:DeliveryEvent a rdfs:Class .
+ex:DeliveryException a rdfs:Class .
+
+ex:supplierId a rdf:Property ; rdfs:domain ex:Supplier .
+ex:purchaseOrderId a rdf:Property ; rdfs:domain ex:PurchaseOrder .
+ex:promisedDeliveryDate a rdf:Property ; rdfs:domain ex:PurchaseOrder .
+ex:actualDeliveryDate a rdf:Property ; rdfs:domain ex:DeliveryEvent .
+ex:delayState a rdf:Property ; rdfs:domain ex:DeliveryException .
+ex:eventTime a rdf:Property ; rdfs:domain ex:DeliveryEvent .
+ex:hasSupplier a rdf:Property ; rdfs:domain ex:PurchaseOrder ; rdfs:range ex:Supplier .
+ex:hasDeliveryEvent a rdf:Property ; rdfs:domain ex:PurchaseOrder ; rdfs:range ex:DeliveryEvent .
+ex:affects a rdf:Property ; rdfs:domain ex:DeliveryException ; rdfs:range ex:PurchaseOrder .

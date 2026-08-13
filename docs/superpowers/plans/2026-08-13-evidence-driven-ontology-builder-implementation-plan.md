@@ -172,7 +172,7 @@ immutable.
 - `MappingCompiler.render_turtle(ontology_candidate) -> str`
 - `MappingCompiler.validate(result) -> CompileValidation`
 
-- [ ] **Step 1: Write failing tests for mapping execution, time semantics, provenance, and ontology rendering**
+- [x] **Step 1: Write failing tests for mapping execution, time semantics, provenance, and ontology rendering**
 
 ```python
 def test_mapping_materializes_one_canonical_purchase_order_with_lineage(result):
@@ -196,21 +196,21 @@ def test_rendered_ontology_contains_classes_properties_and_shapes(result):
     assert "shapes" in result.artifact_hashes
 ```
 
-- [ ] **Step 2: Run focused tests and verify they fail**
+- [x] **Step 2: Run focused tests and verify they fail**
 
 Run: `pytest tests/builder/test_compiler.py -q`
 
 Expected: import failure because the compiler is absent.
 
-- [ ] **Step 3: Implement mapping contracts and deterministic materialization**
+- [x] **Step 3: Implement mapping contracts and deterministic materialization**
 
 Compile source JSON/Markdown candidates to a canonical `purchase_order` product at purchase-order grain. Keep `event_time`, `observed_at`, and `available_at` separate. Attach evidence references and source locations to every canonical row. Reject mappings whose target grain does not match the compiled product or whose source field path cannot be resolved.
 
-- [ ] **Step 4: Render the Ontology candidate and SHACL shapes**
+- [x] **Step 4: Render the Ontology candidate and SHACL shapes**
 
 Generate classes for `Supplier`, `PurchaseOrder`, `DeliveryEvent`, and `DeliveryException`; properties for identity, promised/actual delivery dates, and delay state; and a relationship from purchase order to supplier. Generate shapes for required identity and temporal fields. The compiler writes candidate artifacts, not released facts.
 
-- [ ] **Step 5: Run focused tests and commit**
+- [x] **Step 5: Run focused tests and commit**
 
 Run: `pytest tests/builder/test_compiler.py -q`
 
