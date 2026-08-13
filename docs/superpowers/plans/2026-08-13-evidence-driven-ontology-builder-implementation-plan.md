@@ -101,16 +101,16 @@ Commit: `feat: add evidence-driven source registry`
 **Interfaces:**
 - `CandidateProvider.propose(fragments: list[EvidenceFragment], context: BuilderContext) -> CandidateProposal`
 - `BuilderContext` carries `project_id`, `domain`, `ontology_version`, and `known_terms`.
-- `CandidateProposal` contains `terms`, `entities`, `assertions`, `mappings`, `warnings`, and `evidence_refs`.
+- `CandidateProposal` contains `terms`, `entities`, `assertions`, `mappings`, `warnings`, `evidence_refs`, a proposal version, builder-context digest, and release eligibility.
 - `DeterministicCandidateProvider` extracts supplier, purchase-order, promised-date, actual-delivery-date, and delay-note candidates from the fixtures.
 - `EntityResolver.resolve(candidates: list[EntityCandidate], strategy_version: str) -> list[EntityMatch]`
 - `SemanticCandidateBuilder.build(fragments, context) -> CandidateProposal`
 
-- [ ] **Step 1: Write failing tests for evidence-bound candidates and conservative matching**
+- [x] **Step 1: Write failing tests for evidence-bound candidates and conservative matching**
 
 ```python
 def test_candidate_proposal_keeps_fact_definition_and_assumption_distinct(proposal):
-    assert {item.assertion_type for item in proposal.assertions} == {"fact", "definition", "assumption"}
+    assert {item.assertion_type for item in proposal.assertions} == {"fact", "definition", "assumption", "inference"}
     assert all(item.evidence_refs for item in proposal.assertions if item.assertion_type == "fact")
 
 
@@ -128,25 +128,31 @@ def test_provider_never_promotes_unanchored_inference(proposal):
             assert assertion.evidence_refs
 ```
 
-- [ ] **Step 2: Run the focused tests and verify they fail for the absent semantic builder**
+- [x] **Step 2: Run the focused tests and verify they fail for the absent semantic builder**
 
 Run: `pytest tests/builder/test_semantic_candidates.py -q`
 
 Expected: collection or import failure because the semantic module is absent.
 
-- [ ] **Step 3: Implement deterministic proposal extraction and pluggable provider protocol**
+- [x] **Step 3: Implement deterministic proposal extraction and pluggable provider protocol**
 
 Extract JSON paths and Markdown line ranges into evidence references. Use a typed assertion `fact | definition | rule | assumption | inference`; facts require direct evidence, definitions require a reviewer owner, rules require executable expression text, and assumptions remain unreleased. Do not use a free-form LLM response as an authoritative value.
 
-- [ ] **Step 4: Implement conservative entity resolution**
+- [x] **Step 4: Implement conservative entity resolution**
 
 Use exact external IDs first, then normalized names, then an explicit alias table. For fuzzy/variant matches, emit a score, threshold, matching fields, algorithm version, and conflict refs. High-impact supplier merges remain `probable_match` until a reviewer confirms them.
 
-- [ ] **Step 5: Run focused tests and commit**
+- [x] **Step 5: Run focused tests and commit**
 
 Run: `pytest tests/builder/test_semantic_candidates.py -q`
 
 Commit: `feat: build evidence-bound semantic candidates`
+
+Review repair requirements are part of the completed contract: evidence
+references must semantically support assertions; only source-explicit
+external keys can yield `confirmed`; proposals carry version/context
+provenance; assumptions remain unreleased; and nested assertion values are
+immutable.
 
 ---
 

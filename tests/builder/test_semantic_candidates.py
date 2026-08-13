@@ -117,6 +117,7 @@ def test_candidate_proposal_keeps_fact_definition_and_assumption_distinct(
         "fact",
         "definition",
         "assumption",
+        "inference",
     }
     assert all(
         item.evidence_refs
@@ -137,6 +138,63 @@ def test_supplier_alias_is_probable_match_but_conflict_stays_open(
     assert match.matching_fields
     assert match.algorithm_version
     assert match.conflict_refs
+
+
+def test_source_name_without_external_key_stays_probable_match(proposal: CandidateProposal):
+    candidate = next(item for item in proposal.entities if item.candidate_id == "supplier:acmeindustrial")
+    match = next(item for item in proposal.entity_matches if item.candidate_id == candidate.candidate_id)
+
+    assert candidate.external_key is None
+    assert match.canonical_entity_id == "supplier:acme"
+    assert match.status == "probable_match"
+
+
+def test_date_revision_without_purchase_order_link_is_inference_on_existing_alias(
+    proposal: CandidateProposal,
+):
+    revision = next(
+        item for item in proposal.assertions if item.predicate == "promisedDateRevision"
+    )
+
+    assert revision.assertion_type == "inference"
+    assert revision.subject == "supplier:acme-east"
+
+
+def test_candidate_proposal_carries_context_version_and_unreleased_assumption(
+    proposal: CandidateProposal, context: BuilderContext
+):
+    assert proposal.proposal_version
+    assert proposal.context_digest == context.digest
+    assert all(
+        item.candidate_version == proposal.proposal_version
+        and item.context_digest == context.digest
+        for item in (*proposal.assertions, *proposal.mappings)
+    )
+    assumptions = [item for item in proposal.assertions if item.assertion_type == "assumption"]
+    assert assumptions
+    assert all(item.release_status == "unreleased" for item in assumptions)
+
+
+def test_assumption_cannot_be_marked_release_eligible():
+    with pytest.raises(ValueError, match="unreleased"):
+        SemanticAssertion(
+            assertion_id="assumption:delivery",
+            assertion_type="assumption",
+            subject="purchase-order:PO-001",
+            predicate="actualDeliveryDate",
+            value="unknown",
+            release_status="eligible",
+        )
+
+
+def test_candidate_provider_cannot_self_approve(context: BuilderContext):
+    class SelfApprovingProvider:
+        def propose(self, fragments: list[EvidenceFragment], context: BuilderContext) -> CandidateProposal:
+            del fragments, context
+            return CandidateProposal(release_eligibility="eligible")
+
+    with pytest.raises(ValueError, match="self-approve"):
+        SemanticCandidateBuilder(SelfApprovingProvider()).build(supplier_fragments(), context)
 
 
 def test_provider_never_promotes_unanchored_inference(proposal: CandidateProposal):
@@ -168,6 +226,31 @@ def test_missing_evidence_fact_is_rejected(context: BuilderContext):
 
     with pytest.raises(ValueError, match="evidence"):
         SemanticCandidateBuilder(InvalidProvider()).build(supplier_fragments(), context)
+
+
+def test_evidence_must_semantically_support_fact(context: BuilderContext):
+    fragments = supplier_fragments()
+
+    class InvalidProvider:
+        def propose(self, fragments: list[EvidenceFragment], context: BuilderContext) -> CandidateProposal:
+            del context
+            ref = fragments[0].evidence_id
+            return CandidateProposal(
+                assertions=(
+                    SemanticAssertion(
+                        assertion_id="fact:unsupported",
+                        assertion_type="fact",
+                        subject="supplier:northstar",
+                        predicate="name",
+                        value="Northstar Components",
+                        evidence_refs=(ref,),
+                    ),
+                ),
+                evidence_refs=(ref,),
+            )
+
+    with pytest.raises(ValueError, match="does not support"):
+        SemanticCandidateBuilder(InvalidProvider()).build(fragments, context)
 
 
 def test_assumption_does_not_enter_fact_evidence_set(proposal: CandidateProposal):
@@ -224,3 +307,16 @@ def test_contracts_are_frozen_and_assertion_types_are_typed():
     with pytest.raises((ValidationError, TypeError)):
         assertion.value = "changed"
 
+
+def test_nested_assertion_values_are_immutable():
+    assertion = SemanticAssertion(
+        assertion_id="fact:delivery:metadata",
+        assertion_type="fact",
+        subject="purchase-order:PO-001",
+        predicate="metadata",
+        value={"signals": ["late", "supplier"]},
+        evidence_refs=("evidence:test",),
+    )
+
+    with pytest.raises(TypeError, match="immutable"):
+        assertion.value["signals"].append("unverified")

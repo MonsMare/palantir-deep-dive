@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from hashlib import sha256
 import json
+from math import isfinite
 import re
 from typing import Any, Literal, Protocol, Self
 
@@ -22,6 +23,39 @@ from .contracts import EvidenceFragment
 AssertionType = Literal["fact", "definition", "rule", "assumption", "inference"]
 CandidateStatus = Literal["proposed", "accepted", "rejected", "deprecated"]
 MatchStatus = Literal["confirmed", "probable_match", "unresolved", "rejected"]
+ReleaseStatus = Literal["eligible", "unreleased", "blocked"]
+ReleaseEligibility = Literal["review_required", "blocked", "eligible"]
+
+
+class _ImmutableList(list[Any]):
+    def _immutable(self, *_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("immutable semantic assertion value")
+
+    __setitem__ = __delitem__ = append = clear = extend = insert = pop = remove = reverse = sort = _immutable
+    __iadd__ = __imul__ = _immutable
+
+
+class _ImmutableDict(dict[str, Any]):
+    def _immutable(self, *_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("immutable semantic assertion value")
+
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = _immutable
+
+
+def _immutable_json(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ValueError("assertion values must contain finite numbers")
+        return value
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("assertion value mapping keys must be strings")
+        return _ImmutableDict({key: _immutable_json(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return _ImmutableList(_immutable_json(item) for item in value)
+    raise TypeError("assertion values must be JSON-compatible")
 
 
 def _nonblank(value: str, name: str) -> str:
@@ -37,6 +71,44 @@ def _stable_id(prefix: str, *parts: str) -> str:
 
 def _normalize_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def _semantic_tokens(value: Any) -> set[str]:
+    """Return comparison tokens while retaining compact identifiers."""
+
+    text = str(value)
+    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
+    return {token for token in re.split(r"[^a-zA-Z0-9]+", text.lower()) if token}
+
+
+def _compact_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+_GENERIC_ASSERTION_TOKENS = frozenset(
+    {
+        "actual",
+        "assertion",
+        "date",
+        "delivery",
+        "display",
+        "event",
+        "fact",
+        "name",
+        "of",
+        "order",
+        "po",
+        "promised",
+        "purchase",
+        "revision",
+        "source",
+        "supplier",
+        "the",
+        "to",
+        "unknown",
+        "variant",
+    }
+)
 
 
 class BuilderContext(BaseModel):
@@ -58,6 +130,21 @@ class BuilderContext(BaseModel):
     @classmethod
     def validate_terms(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(_nonblank(item, "known_terms item") for item in value)
+
+    @property
+    def digest(self) -> str:
+        payload = json.dumps(
+            {
+                "project_id": self.project_id,
+                "domain": self.domain,
+                "ontology_version": self.ontology_version,
+                "known_terms": self.known_terms,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return sha256(payload).hexdigest()
 
 
 class TermCandidate(BaseModel):
@@ -143,11 +230,40 @@ class SemanticAssertion(BaseModel):
     evidence_refs: tuple[str, ...] = ()
     reviewer_owner: str | None = None
     expression: str | None = None
+    candidate_version: str = "unversioned"
+    context_digest: str | None = None
+    release_status: ReleaseStatus = "eligible"
 
     @field_validator("assertion_id", "subject", "predicate")
     @classmethod
     def validate_identity(cls, value: str, info: Any) -> str:
         return _nonblank(value, info.field_name)
+
+    @field_validator("candidate_version")
+    @classmethod
+    def validate_candidate_version(cls, value: str) -> str:
+        return _nonblank(value, "candidate_version")
+
+    @field_validator("context_digest")
+    @classmethod
+    def validate_assertion_context_digest(cls, value: str | None) -> str | None:
+        return None if value is None else _nonblank(value, "context_digest")
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def freeze_value(cls, value: Any) -> Any:
+        return _immutable_json(value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_assumption_status(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping) or data.get("assertion_type") != "assumption":
+            return data
+        normalized = dict(data)
+        if normalized.get("release_status", "unreleased") == "eligible":
+            raise ValueError("assumption assertions must remain unreleased or blocked")
+        normalized.setdefault("release_status", "unreleased")
+        return normalized
 
     @model_validator(mode="after")
     def validate_epistemic_fields(self) -> Self:
@@ -155,6 +271,8 @@ class SemanticAssertion(BaseModel):
             raise ValueError("definition assertions require reviewer_owner")
         if self.assertion_type == "rule" and not self.expression:
             raise ValueError("rule assertions require executable expression")
+        if self.assertion_type == "assumption" and self.release_status == "eligible":
+            raise ValueError("assumption assertions must remain unreleased or blocked")
         return self
 
 
@@ -171,6 +289,8 @@ class MappingCandidate(BaseModel):
     identity_rule: str
     time_semantics: str
     null_policy: str = "preserve"
+    candidate_version: str = "unversioned"
+    context_digest: str | None = None
 
     @field_validator(
         "mapping_id",
@@ -186,6 +306,16 @@ class MappingCandidate(BaseModel):
     def validate_text(cls, value: str, info: Any) -> str:
         return _nonblank(value, info.field_name)
 
+    @field_validator("candidate_version")
+    @classmethod
+    def validate_candidate_version(cls, value: str) -> str:
+        return _nonblank(value, "candidate_version")
+
+    @field_validator("context_digest")
+    @classmethod
+    def validate_mapping_context_digest(cls, value: str | None) -> str | None:
+        return None if value is None else _nonblank(value, "context_digest")
+
     @field_validator("source_evidence_refs")
     @classmethod
     def validate_evidence(cls, value: tuple[str, ...]) -> tuple[str, ...]:
@@ -195,7 +325,7 @@ class MappingCandidate(BaseModel):
 
 
 class CandidateProposal(BaseModel):
-    """The complete mutable proposal produced before review and compilation."""
+    """The complete immutable proposal produced before review and compilation."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -206,6 +336,19 @@ class CandidateProposal(BaseModel):
     mappings: tuple[MappingCandidate, ...] = ()
     warnings: tuple[str, ...] = ()
     evidence_refs: tuple[str, ...] = ()
+    proposal_version: str = "semantic-candidate-v1"
+    context_digest: str | None = None
+    release_eligibility: ReleaseEligibility = "review_required"
+
+    @field_validator("proposal_version")
+    @classmethod
+    def validate_proposal_version(cls, value: str) -> str:
+        return _nonblank(value, "proposal_version")
+
+    @field_validator("context_digest")
+    @classmethod
+    def validate_context_digest(cls, value: str | None) -> str | None:
+        return None if value is None else _nonblank(value, "context_digest")
 
     @field_validator("warnings")
     @classmethod
@@ -243,7 +386,6 @@ class DeterministicCandidateProvider:
         assertions: dict[str, SemanticAssertion] = {}
         mappings: dict[str, MappingCandidate] = {}
         warnings: list[str] = []
-        first_ref = evidence_refs[0] if evidence_refs else ""
 
         for fragment in ordered:
             content = fragment.content
@@ -267,6 +409,11 @@ class DeterministicCandidateProvider:
             else:
                 warnings.append(f"unsupported semantic locator: {fragment.locator}")
 
+        definition_refs = tuple(
+            item.evidence_id
+            for item in ordered
+            if {"promised", "date"} & _semantic_tokens(item.content)
+        )
         definition_id = "definition:delivery-delay"
         assertions[definition_id] = SemanticAssertion(
             assertion_id=definition_id,
@@ -274,7 +421,7 @@ class DeterministicCandidateProvider:
             subject="DeliveryEvent",
             predicate="delayRule",
             value="actual_delivery_date > promised_delivery_date",
-            evidence_refs=(first_ref,) if first_ref else (),
+            evidence_refs=definition_refs,
             reviewer_owner="procurement-owner",
         )
         assumption_id = "assumption:actual-delivery-date"
@@ -284,6 +431,7 @@ class DeterministicCandidateProvider:
             subject="purchase-order:PO-001",
             predicate="actualDeliveryDate",
             value="unknown",
+            release_status="unreleased",
         )
         return CandidateProposal(
             terms=tuple(sorted(terms.values(), key=lambda item: item.term_id)),
@@ -319,7 +467,7 @@ class DeterministicCandidateProvider:
             candidate_id=supplier_candidate_id,
             entity_type="supplier",
             name=supplier_name,
-            external_key=self._external_key(supplier_id),
+            external_key=self._source_external_key(payload),
             source_evidence_refs=(po_ref,),
         )
         po_candidate_id = f"purchase-order:{po_id}"
@@ -410,7 +558,7 @@ class DeterministicCandidateProvider:
                 assertion_type="fact",
                 subject=alias_id,
                 predicate="displayNameVariantOf",
-                value=f"supplier:{_normalize_name(canonical)}",
+                value=self._canonical_supplier_id(canonical),
                 evidence_refs=(ref,),
             )
             terms["term:display-name-variant"] = TermCandidate(
@@ -425,10 +573,10 @@ class DeterministicCandidateProvider:
             content,
         )
         if date_change:
-            alias_id = f"supplier:{_normalize_name(date_change.group('alias'))}"
-            assertions[f"fact:{alias_id}:promised-date-revision"] = SemanticAssertion(
-                assertion_id=f"fact:{alias_id}:promised-date-revision",
-                assertion_type="fact",
+            alias_id = self._alias_candidate_id(date_change.group("alias"))
+            assertions[f"inference:{alias_id}:promised-date-revision"] = SemanticAssertion(
+                assertion_id=f"inference:{alias_id}:promised-date-revision",
+                assertion_type="inference",
                 subject=alias_id,
                 predicate="promisedDateRevision",
                 value=date_change.group("date"),
@@ -465,9 +613,14 @@ class DeterministicCandidateProvider:
             return "supplier:acme-east"
         return f"supplier:{normalized}"
 
-    def _external_key(self, entity_id: str) -> str | None:
-        data = self.canonical_entities.get(entity_id)
-        return None if data is None else data.get("external_key")
+    @staticmethod
+    def _source_external_key(payload: Mapping[str, Any]) -> str | None:
+        """Only accept an external key when the source explicitly carries it."""
+
+        value = payload.get("supplier_external_key")
+        if value is None:
+            return None
+        return _nonblank(str(value), "supplier_external_key")
 
 
 class EntityResolver:
@@ -488,7 +641,7 @@ class EntityResolver:
         strategy_version = _nonblank(strategy_version, "strategy_version")
         results: list[EntityMatch] = []
         for candidate in candidates:
-            exact = self._exact_match(candidate)
+            exact = self._external_key_match(candidate)
             if exact is not None:
                 results.append(
                     EntityMatch(
@@ -499,6 +652,21 @@ class EntityResolver:
                         matching_fields=("external_key",) if candidate.external_key else ("name",),
                         algorithm_version=strategy_version,
                         status="confirmed",
+                    )
+                )
+                continue
+            name_match = self._name_match(candidate)
+            if name_match is not None:
+                results.append(
+                    EntityMatch(
+                        candidate_id=candidate.candidate_id,
+                        canonical_entity_id=name_match,
+                        score=0.86,
+                        threshold=0.8,
+                        matching_fields=("name",),
+                        algorithm_version=strategy_version,
+                        conflict_refs=candidate.conflict_refs,
+                        status="probable_match",
                     )
                 )
                 continue
@@ -534,11 +702,14 @@ class EntityResolver:
             )
         return results
 
-    def _exact_match(self, candidate: EntityCandidate) -> str | None:
+    def _external_key_match(self, candidate: EntityCandidate) -> str | None:
         if candidate.external_key:
             for entity_id, data in self._canonical_entities.items():
                 if data.get("external_key") == candidate.external_key:
                     return entity_id
+        return None
+
+    def _name_match(self, candidate: EntityCandidate) -> str | None:
         normalized = _normalize_name(candidate.name)
         for entity_id, data in self._canonical_entities.items():
             if _normalize_name(data.get("name", "")) == normalized:
@@ -565,25 +736,51 @@ class SemanticCandidateBuilder:
         self, fragments: list[EvidenceFragment], context: BuilderContext
     ) -> CandidateProposal:
         proposal = self._provider.propose(list(fragments), context)
+        if proposal.release_eligibility == "eligible":
+            raise ValueError("candidate provider cannot self-approve a proposal")
         evidence_refs = {item.evidence_id for item in fragments}
-        self._validate_assertions(proposal.assertions, evidence_refs)
+        fragment_by_id = {item.evidence_id: item for item in fragments}
+        self._validate_assertions(proposal.assertions, fragment_by_id)
         self._validate_evidence_refs(proposal, evidence_refs)
         matches = tuple(
             self._resolver.resolve(list(proposal.entities), self._strategy_version)
+        )
+        assertions = tuple(
+            SemanticAssertion(
+                **{
+                    **item.model_dump(mode="python"),
+                    "candidate_version": proposal.proposal_version,
+                    "context_digest": context.digest,
+                }
+            )
+            for item in proposal.assertions
+        )
+        mappings = tuple(
+            MappingCandidate(
+                **{
+                    **item.model_dump(mode="python"),
+                    "candidate_version": proposal.proposal_version,
+                    "context_digest": context.digest,
+                }
+            )
+            for item in proposal.mappings
         )
         return CandidateProposal(
             terms=proposal.terms,
             entities=proposal.entities,
             entity_matches=matches,
-            assertions=proposal.assertions,
-            mappings=proposal.mappings,
+            assertions=assertions,
+            mappings=mappings,
             warnings=proposal.warnings,
             evidence_refs=proposal.evidence_refs,
+            proposal_version=proposal.proposal_version,
+            context_digest=context.digest,
+            release_eligibility=proposal.release_eligibility,
         )
 
     @staticmethod
     def _validate_assertions(
-        assertions: Sequence[SemanticAssertion], evidence_refs: set[str]
+        assertions: Sequence[SemanticAssertion], fragments: Mapping[str, EvidenceFragment]
     ) -> None:
         for assertion in assertions:
             refs = set(assertion.evidence_refs)
@@ -591,8 +788,36 @@ class SemanticCandidateBuilder:
                 raise ValueError(
                     f"{assertion.assertion_type} assertion {assertion.assertion_id} requires evidence"
                 )
-            if not refs.issubset(evidence_refs):
+            if not refs.issubset(fragments):
                 raise ValueError(f"assertion {assertion.assertion_id} references unknown evidence")
+            if assertion.assertion_type in {"fact", "definition", "rule", "inference"}:
+                for ref in assertion.evidence_refs:
+                    if not SemanticCandidateBuilder._evidence_supports_assertion(
+                        assertion, fragments[ref]
+                    ):
+                        raise ValueError(
+                            f"evidence {ref} does not support assertion {assertion.assertion_id}"
+                        )
+
+    @staticmethod
+    def _evidence_supports_assertion(
+        assertion: SemanticAssertion, fragment: EvidenceFragment
+    ) -> bool:
+        content_tokens = _semantic_tokens(fragment.content)
+        compact_content = _compact_text(fragment.content)
+        values = (assertion.subject, assertion.predicate, assertion.value)
+        compact_matches = {
+            _compact_text(str(value))
+            for value in values
+            if len(_compact_text(str(value))) >= 3
+        }
+        if any(candidate in compact_content for candidate in compact_matches):
+            return True
+        assertion_tokens = set().union(*(_semantic_tokens(value) for value in values))
+        if assertion.assertion_type in {"definition", "rule"}:
+            return bool(assertion_tokens & content_tokens)
+        specific_tokens = assertion_tokens - _GENERIC_ASSERTION_TOKENS
+        return bool(specific_tokens & content_tokens)
 
     @staticmethod
     def _validate_evidence_refs(
