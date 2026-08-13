@@ -1,0 +1,12 @@
+products:
+  requirements: "one row per RequirementVersion"
+  change_events: "one row per ChangeRequest event"
+  work_item_lifecycle: "one row per WorkItem state interval"
+  capacity: "one row per Team and Sprint capacity snapshot"
+  dependencies: "one row per dependency edge"
+quality_rules:
+  - requirements.primary-key
+  - changes.foreign-key
+  - lifecycle.nonnegative-duration
+  - dependency.no-cycle
+  - capacity.nonnegative

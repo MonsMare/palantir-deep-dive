@@ -1,0 +1,11 @@
+seed: 20260811
+teams: 3
+people: 12
+modules: 5
+sprints: 8
+requirements: 80
+work_items: 160
+change_requests: 40
+start_date: "2026-01-05"
+sprint_length_days: 14
+ingestion_delay_days: 1

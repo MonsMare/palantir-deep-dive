@@ -1,0 +1,29 @@
+@prefix ex: <urn:software-delivery:> .
+
+ex:ontology a ex:Ontology ;
+    ex:version "1.0.0" ;
+    ex:sourceRef "synthetic-software-delivery-fixture" .
+
+ex:Project a ex:Class .
+ex:Requirement a ex:Class .
+ex:RequirementVersion a ex:Class .
+ex:ChangeRequest a ex:Class .
+ex:AcceptanceCriterion a ex:Class .
+ex:Stakeholder a ex:Class .
+ex:Module a ex:Class .
+ex:WorkItem a ex:Class .
+ex:Dependency a ex:Class .
+ex:Sprint a ex:Class .
+ex:Team a ex:Class .
+ex:Person a ex:Class .
+ex:CapacitySnapshot a ex:Class .
+ex:BlockerEvent a ex:Class .
+ex:Estimate a ex:Class .
+ex:DeliveryPrediction a ex:Class .
+ex:DeliveryRisk a ex:Class .
+ex:CandidatePlan a ex:Class .
+ex:PlanChange a ex:Class .
+ex:ActionRequest a ex:Class .
+ex:ActionOutcome a ex:Class .
+ex:Feedback a ex:Class .
+
