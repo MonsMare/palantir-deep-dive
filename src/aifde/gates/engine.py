@@ -197,6 +197,27 @@ class GateEngine:
         except KeyError as exc:
             raise KeyError(f"unknown stage run: {stage_run_id}") from exc
 
+    def list_stage_runs(self, project_id: str | None = None) -> list[StageRun]:
+        """Return defensive copies of registered stage runs for release services."""
+        runs = [
+            run
+            for run in self._stage_runs.values()
+            if project_id is None or run.project_id == project_id
+        ]
+        return [_copy_model(run) for run in runs]
+
+    def list_gate_runs(self, stage_run_id: str) -> list[GateRun]:
+        """Return every immutable gate snapshot recorded for one stage run."""
+        self.get_stage_run(stage_run_id)
+        return [_copy_model(run) for run in self._gate_runs[stage_run_id]]
+
+    def get_gate_run(self, stage_run_id: str, gate_run_id: str) -> GateRun:
+        """Return one gate snapshot without exposing the engine's mutable store."""
+        for gate_run in self.list_gate_runs(stage_run_id):
+            if gate_run.gate_run_id == gate_run_id:
+                return gate_run
+        raise KeyError(f"unknown gate run: {gate_run_id}")
+
     def register_result(
         self,
         stage_run_id: str,
