@@ -17,6 +17,7 @@ from aifde.builder.semantic import (
     EntityResolver,
     SemanticAssertion,
     SemanticCandidateBuilder,
+    TermCandidate,
 )
 from aifde.builder.sources import SourceRegistry
 
@@ -168,7 +169,13 @@ def test_candidate_proposal_carries_context_version_and_unreleased_assumption(
     assert all(
         item.candidate_version == proposal.proposal_version
         and item.context_digest == context.digest
-        for item in (*proposal.assertions, *proposal.mappings)
+        for item in (
+            *proposal.terms,
+            *proposal.entities,
+            *proposal.entity_matches,
+            *proposal.assertions,
+            *proposal.mappings,
+        )
     )
     assumptions = [item for item in proposal.assertions if item.assertion_type == "assumption"]
     assert assumptions
@@ -185,6 +192,37 @@ def test_assumption_cannot_be_marked_release_eligible():
             value="unknown",
             release_status="eligible",
         )
+
+
+def test_inference_defaults_to_unreleased():
+    assertion = SemanticAssertion(
+        assertion_id="inference:delivery-risk",
+        assertion_type="inference",
+        subject="supplier:acme-east",
+        predicate="riskSignal",
+        value="late",
+        evidence_refs=("evidence:test",),
+    )
+
+    assert assertion.release_status == "unreleased"
+
+
+def test_model_copy_revalidates_release_status_and_nested_values():
+    assertion = SemanticAssertion(
+        assertion_id="inference:delivery-risk",
+        assertion_type="inference",
+        subject="supplier:acme-east",
+        predicate="riskSignal",
+        value={"signals": ["late"]},
+        evidence_refs=("evidence:test",),
+    )
+
+    with pytest.raises(ValueError, match="unreleased"):
+        assertion.model_copy(update={"release_status": "eligible"})
+
+    copied = assertion.model_copy(deep=True)
+    with pytest.raises(TypeError, match="immutable"):
+        copied.value["signals"].append("changed")
 
 
 def test_candidate_provider_cannot_self_approve(context: BuilderContext):
@@ -249,8 +287,150 @@ def test_evidence_must_semantically_support_fact(context: BuilderContext):
                 evidence_refs=(ref,),
             )
 
+    with pytest.raises(ValueError, match="subject candidate|does not support"):
+        SemanticCandidateBuilder(InvalidProvider()).build(fragments, context)
+
+
+def test_generic_tokens_do_not_semantically_support_a_fact(context: BuilderContext):
+    fragments = supplier_fragments()
+
+    class InvalidProvider:
+        def propose(self, fragments: list[EvidenceFragment], context: BuilderContext) -> CandidateProposal:
+            del context
+            ref = fragments[0].evidence_id
+            return CandidateProposal(
+                assertions=(
+                    SemanticAssertion(
+                        assertion_id="fact:generic-only",
+                        assertion_type="fact",
+                        subject="supplier",
+                        predicate="date",
+                        value="delivery",
+                        evidence_refs=(ref,),
+                    ),
+                ),
+                evidence_refs=(ref,),
+            )
+
     with pytest.raises(ValueError, match="does not support"):
         SemanticCandidateBuilder(InvalidProvider()).build(fragments, context)
+
+
+def test_inference_requires_evidence(context: BuilderContext):
+    class InvalidProvider:
+        def propose(self, fragments: list[EvidenceFragment], context: BuilderContext) -> CandidateProposal:
+            del fragments, context
+            return CandidateProposal(
+                assertions=(
+                    SemanticAssertion(
+                        assertion_id="inference:unanchored",
+                        assertion_type="inference",
+                        subject="supplier:acme-east",
+                        predicate="riskSignal",
+                        value="late",
+                    ),
+                ),
+            )
+
+    with pytest.raises(ValueError, match="requires evidence"):
+        SemanticCandidateBuilder(InvalidProvider()).build(supplier_fragments(), context)
+
+
+def test_assertion_refs_must_be_listed_in_proposal_evidence_refs(context: BuilderContext):
+    class InvalidProvider:
+        def propose(self, fragments: list[EvidenceFragment], context: BuilderContext) -> CandidateProposal:
+            del context
+            ref = fragments[0].evidence_id
+            return CandidateProposal(
+                assertions=(
+                    SemanticAssertion(
+                        assertion_id="fact:omitted-top-level-ref",
+                        assertion_type="fact",
+                        subject="purchase-order:PO-001",
+                        predicate="promisedDeliveryDate",
+                        value="2026-09-01",
+                        evidence_refs=(ref,),
+                    ),
+                ),
+                evidence_refs=(),
+            )
+
+    with pytest.raises(ValueError, match="proposal evidence|subject candidate"):
+        SemanticCandidateBuilder(InvalidProvider()).build(supplier_fragments(), context)
+
+
+def test_external_key_must_be_present_in_source_evidence(context: BuilderContext):
+    class InvalidProvider:
+        def propose(self, fragments: list[EvidenceFragment], context: BuilderContext) -> CandidateProposal:
+            del context
+            ref = fragments[0].evidence_id
+            return CandidateProposal(
+                entities=(
+                    EntityCandidate(
+                        candidate_id="supplier:injected",
+                        entity_type="supplier",
+                        name="Acme Industrial",
+                        external_key="ACME-001",
+                        source_evidence_refs=(ref,),
+                    ),
+                ),
+                evidence_refs=(ref,),
+            )
+
+    with pytest.raises(ValueError, match="external_key"):
+        SemanticCandidateBuilder(InvalidProvider()).build(supplier_fragments(), context)
+
+
+def test_inference_subject_must_be_an_entity_candidate(context: BuilderContext):
+    class InvalidProvider:
+        def propose(self, fragments: list[EvidenceFragment], context: BuilderContext) -> CandidateProposal:
+            del context
+            ref = fragments[0].evidence_id
+            return CandidateProposal(
+                assertions=(
+                    SemanticAssertion(
+                        assertion_id="inference:dangling",
+                        assertion_type="inference",
+                        subject="supplier:missing",
+                        predicate="riskSignal",
+                        value="late",
+                        evidence_refs=(ref,),
+                    ),
+                ),
+                evidence_refs=(ref,),
+            )
+
+    with pytest.raises(ValueError, match="subject candidate"):
+        SemanticCandidateBuilder(InvalidProvider()).build(supplier_fragments(), context)
+
+
+def test_terms_and_entities_must_have_semantically_supporting_evidence(context: BuilderContext):
+    class InvalidProvider:
+        def propose(self, fragments: list[EvidenceFragment], context: BuilderContext) -> CandidateProposal:
+            del context
+            ref = fragments[0].evidence_id
+            return CandidateProposal(
+                terms=(
+                    TermCandidate(
+                        term_id="term:unrelated",
+                        surface_forms=("unrelated",),
+                        canonical_label="Unrelated",
+                        source_evidence_refs=(ref,),
+                    ),
+                ),
+                entities=(
+                    EntityCandidate(
+                        candidate_id="supplier:unrelated",
+                        entity_type="supplier",
+                        name="Unrelated Supplier",
+                        source_evidence_refs=(ref,),
+                    ),
+                ),
+                evidence_refs=(ref,),
+            )
+
+    with pytest.raises(ValueError, match="does not support"):
+        SemanticCandidateBuilder(InvalidProvider()).build(supplier_fragments(), context)
 
 
 def test_assumption_does_not_enter_fact_evidence_set(proposal: CandidateProposal):
