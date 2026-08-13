@@ -7,7 +7,7 @@ from hashlib import sha256
 from math import isfinite
 from typing import Any, Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class _ImmutableList(list[Any]):
@@ -89,7 +89,12 @@ class SourceAsset(BaseModel):
     )
     @classmethod
     def reject_blank_fields(cls, value: str, info: Any) -> str:
-        return _require_non_blank(value, info.field_name)
+        normalized = _require_non_blank(value, info.field_name)
+        if info.field_name in {"uri", "source_type"}:
+            markers = ("chat", "prompt", "model-output", "inference")
+            if any(marker in normalized.lower() for marker in markers):
+                raise ValueError(f"{info.field_name} must not identify model-generated sources")
+        return normalized
 
     @field_validator("metadata", mode="before")
     @classmethod
@@ -167,6 +172,12 @@ class SourceSnapshot(BaseModel):
         if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
             raise ValueError("content_hash must be a SHA-256 hexadecimal digest")
         return value
+
+    @model_validator(mode="after")
+    def validate_content_hash_matches_content(self) -> SourceSnapshot:
+        if self.content_hash != _content_hash(self.content):
+            raise ValueError("content_hash does not match content")
+        return self
 
     @classmethod
     def capture(
@@ -249,6 +260,17 @@ class EvidenceFragment(BaseModel):
             raise ValueError("content hash must be a SHA-256 hexadecimal digest")
         return value
 
+    @model_validator(mode="before")
+    @classmethod
+    def validate_content_hash_matches_content(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            content = value.get("content")
+            content_hash = value.get("content_hash")
+            if isinstance(content, str) and isinstance(content_hash, str):
+                if content_hash != _content_hash(content.encode("utf-8")):
+                    raise ValueError("content_hash does not match content")
+        return value
+
     @classmethod
     def from_snapshot(
         cls,
@@ -305,4 +327,3 @@ class EvidenceFragment(BaseModel):
     @property
     def available_time(self) -> datetime:
         return self.available_at
-

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from hashlib import sha256
+import json
 from pathlib import Path
 
 import pytest
@@ -39,10 +40,11 @@ def registry() -> SourceRegistry:
 
 def test_snapshot_hash_and_fragment_locator_are_stable(registry: SourceRegistry):
     asset = registry.register(make_asset())
+    source = b'{"orders":[{"po_id":"PO-001"}]}'
     snapshot = registry.capture(
         asset.source_asset_id,
         "2026-08-13",
-        b'{"po_id":"PO-001"}',
+        source,
         observed_at=dt(9),
         available_at=dt(10),
         extraction_version="raw-v1",
@@ -50,7 +52,7 @@ def test_snapshot_hash_and_fragment_locator_are_stable(registry: SourceRegistry)
 
     fragment = registry.slice(snapshot.snapshot_id, "$.orders[0]", '{"po_id":"PO-001"}')
 
-    assert snapshot.content_hash == sha256(b'{"po_id":"PO-001"}').hexdigest()
+    assert snapshot.content_hash == sha256(source).hexdigest()
     assert snapshot.content_hash == fragment.source_content_hash
     assert fragment.locator == "$.orders[0]"
     assert fragment.evidence_id.startswith("evidence:")
@@ -102,7 +104,14 @@ def test_registry_returns_defensive_copies_and_preserves_both_evidence_texts(
     registry: SourceRegistry,
 ):
     asset = registry.register(make_asset())
-    snapshot = registry.capture(asset.source_asset_id, "v1", b"source", dt(9), dt(9), "raw-v1")
+    snapshot = registry.capture(
+        asset.source_asset_id,
+        "v1",
+        b"Promised date: 2026-09-01",
+        dt(9),
+        dt(9),
+        "raw-v1",
+    )
     fragment = registry.slice(
         snapshot.snapshot_id,
         "line:1",
@@ -158,8 +167,26 @@ def test_supplier_fixtures_capture_overlapping_sources_with_original_locations(
     json_snapshot = registry.capture(asset_json.source_asset_id, "2026-08-13", json_content, dt(9), dt(10), "raw-v1")
     notes_snapshot = registry.capture(asset_notes.source_asset_id, "2026-08-13", notes_content, dt(11), dt(12), "raw-v1")
 
-    po_fragment = registry.slice(json_snapshot.snapshot_id, "$.purchase_orders[0]", '{"supplier":"Acme Industrial","promised_date":"2026-09-01"}')
-    note_fragment = registry.slice(notes_snapshot.snapshot_id, "line:3-4", "Acme Industries promised date changed to 2026-09-05.")
+    po_fragment = registry.slice(
+        json_snapshot.snapshot_id,
+        "$.purchase_orders[0]",
+        json.dumps(
+            {
+                "po_id": "PO-001",
+                "supplier": "Acme Industrial",
+                "promised_date": "2026-09-01",
+                "items": [{"sku": "VALVE-100", "quantity": 20}],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+    note_fragment = registry.slice(
+        notes_snapshot.snapshot_id,
+        "line:3-4",
+        "- Acme Industries is the display-name variant for Acme Industrial.\n"
+        "- Acme Industries promised date changed to 2026-09-05.",
+    )
 
     assert po_fragment.snapshot_id == json_snapshot.snapshot_id
     assert po_fragment.locator == "$.purchase_orders[0]"
@@ -168,3 +195,94 @@ def test_supplier_fixtures_capture_overlapping_sources_with_original_locations(
     assert "Acme Industrial" in json_content.decode()
     assert "Acme Industries" in notes_content.decode()
     assert "2026-09-05" in notes_content.decode()
+
+
+def test_slice_rejects_content_that_cannot_be_replayed_from_locator(
+    registry: SourceRegistry,
+):
+    asset = registry.register(make_asset())
+    snapshot = registry.capture(
+        asset.source_asset_id,
+        "v1",
+        b'{"purchase_orders":[{"po_id":"PO-001"}]}',
+        dt(9),
+        dt(10),
+        "raw-v1",
+    )
+
+    with pytest.raises(ValueError, match="does not match"):
+        registry.slice(
+            snapshot.snapshot_id,
+            "$.purchase_orders[0]",
+            '{"po_id":"PO-999"}',
+        )
+
+
+def test_same_version_capture_rejects_changed_lineage(registry: SourceRegistry):
+    asset = registry.register(make_asset())
+    registry.capture(asset.source_asset_id, "v1", b"one", dt(9), dt(9), "raw-v1")
+
+    with pytest.raises(ValueError, match="immutable"):
+        registry.capture(asset.source_asset_id, "v1", b"one", dt(10), dt(9), "raw-v1")
+
+    with pytest.raises(ValueError, match="immutable"):
+        registry.capture(asset.source_asset_id, "v1", b"one", dt(9), dt(9), "raw-v2")
+
+
+def test_source_registry_rejects_model_generated_sources():
+    with pytest.raises(ValidationError, match="source_type"):
+        SourceAsset.register(
+            "chat-source",
+            "chat://conversation/1",
+            "chat",
+            "agent",
+            0,
+            "internal",
+            "policy:none",
+            "chat-v1",
+            {},
+        )
+
+    with pytest.raises(ValidationError, match="uri"):
+        SourceAsset.register(
+            "model-source",
+            "model-output://run/1",
+            "text",
+            "agent",
+            0,
+            "internal",
+            "policy:none",
+            "model-v1",
+            {},
+        )
+
+
+def test_models_reject_tampered_content_hashes():
+    with pytest.raises(ValidationError, match="content_hash"):
+        SourceSnapshot(
+            snapshot_id="snapshot:tampered",
+            source_asset_id="asset-1",
+            version="v1",
+            content=b"actual",
+            content_hash=sha256(b"different").hexdigest(),
+            observed_at=dt(9),
+            available_at=dt(10),
+            extraction_version="raw-v1",
+        )
+
+    with pytest.raises(ValidationError, match="content_hash"):
+        EvidenceFragment(
+            evidence_id="evidence:tampered",
+            snapshot_id="snapshot:1",
+            source_asset_id="asset-1",
+            source_version="v1",
+            locator="line:1",
+            content="actual",
+            normalized_content="actual",
+            content_hash=sha256(b"different").hexdigest(),
+            source_content_hash=sha256(b"source").hexdigest(),
+            observed_at=dt(9),
+            available_at=dt(10),
+            extraction_method="markdown",
+            extraction_version="raw-v1",
+        )
