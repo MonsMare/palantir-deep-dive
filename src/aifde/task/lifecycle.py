@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from threading import RLock
 from types import MappingProxyType
 from typing import Any, ClassVar, Mapping
 
@@ -92,11 +93,6 @@ class FailureFact(BaseModel):
         return _require_nonblank(value, info.field_name)
 
 
-_PRINCIPAL_TOKEN = object()
-_RESOLVER_TOKEN = object()
-_LIFECYCLE_MUTATION_TOKEN = object()
-
-
 class ActorPrincipal:
     """Opaque actor identity issued by a trusted ``TrustedActorResolver``.
 
@@ -116,21 +112,27 @@ class ActorPrincipal:
         self,
         actor_id: str,
         authority: ActorAuthority | None = None,
-        *,
-        _token: object | None = None,
-        _resolver_identity: object | None = None,
     ) -> None:
-        if _token is not _PRINCIPAL_TOKEN:
-            raise TypeError(
-                "ActorPrincipal can only be issued by the trusted lifecycle resolver"
-            )
-        self._actor_id = _require_nonblank(actor_id, "actor")
+        raise TypeError(
+            "ActorPrincipal can only be issued by the trusted lifecycle resolver"
+        )
+
+    @classmethod
+    def _issue(
+        cls,
+        actor_id: str,
+        authority: ActorAuthority,
+        resolver_identity: object,
+    ) -> "ActorPrincipal":
+        principal = object.__new__(cls)
+        principal._actor_id = _require_nonblank(actor_id, "actor")
         try:
-            self._authority = ActorAuthority(authority)
+            principal._authority = ActorAuthority(authority)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"unknown actor authority: {authority!r}") from exc
-        self._resolver_identity = _resolver_identity
-        object.__setattr__(self, "_sealed", True)
+        principal._resolver_identity = resolver_identity
+        object.__setattr__(principal, "_sealed", True)
+        return principal
 
     @property
     def actor_id(self) -> str:
@@ -155,9 +157,8 @@ class TrustedActorResolver:
 
     ``from_static`` is a bootstrap operation.  It is intentionally not
     accepted by ``TaskLifecycle.transition``; a transition only accepts a
-    principal issued by the resolver bound to its context.  In particular,
-    an identity conventionally named as an agent cannot be configured as a
-    human authority, preventing the common self-escalation test case.
+    principal issued by the resolver bound to its context.  Authority comes
+    from the resolver binding, never from an actor-name convention.
     """
 
     __slots__ = ("_actor_authorities", "_identity")
@@ -165,13 +166,7 @@ class TrustedActorResolver:
     def __init__(
         self,
         actor_authorities: Mapping[str, ActorAuthority],
-        *,
-        _token: object | None = None,
     ) -> None:
-        if _token is not _RESOLVER_TOKEN:
-            raise TypeError(
-                "TrustedActorResolver must be created through from_static"
-            )
         if not isinstance(actor_authorities, Mapping) or not actor_authorities:
             raise ValueError("actor_authorities must not be empty")
 
@@ -184,13 +179,6 @@ class TrustedActorResolver:
                 raise ValueError(f"unknown actor authority: {authority!r}") from exc
             if actor_id in normalized:
                 raise ValueError(f"duplicate actor binding: {actor_id!r}")
-            if (
-                resolved_authority is ActorAuthority.HUMAN
-                and actor_id.casefold().startswith("agent")
-            ):
-                raise ValueError(
-                    "agent identities cannot be bound to human authority"
-                )
             normalized[actor_id] = resolved_authority
 
         self._actor_authorities = MappingProxyType(normalized)
@@ -202,7 +190,7 @@ class TrustedActorResolver:
     ) -> "TrustedActorResolver":
         """Create the resolver during trusted application bootstrap."""
 
-        return cls(actor_authorities, _token=_RESOLVER_TOKEN)
+        return cls(actor_authorities)
 
     def issue(self, actor: str) -> ActorPrincipal:
         actor_id = _require_nonblank(actor, "actor")
@@ -212,11 +200,10 @@ class TrustedActorResolver:
             raise UnauthorizedActorError(
                 f"actor is not bound by the trusted resolver: {actor_id!r}"
             ) from exc
-        return ActorPrincipal(
+        return ActorPrincipal._issue(
             actor_id,
             authority,
-            _token=_PRINCIPAL_TOKEN,
-            _resolver_identity=self._identity,
+            self._identity,
         )
 
     def resolve(self, principal: ActorPrincipal) -> ActorAuthority:
@@ -292,7 +279,11 @@ class TaskRunRegistry:
     """
 
     def __init__(self) -> None:
+        self._lock = RLock()
         self._runs: dict[str, Any] = {}
+        self._pending_events: dict[int, tuple[Any, Any, Any, Any]] = {}
+        self._events: list[Any] = []
+        self._event_ids: set[str] = set()
 
     def create_run(
         self,
@@ -304,155 +295,252 @@ class TaskRunRegistry:
     ) -> Any:
         from .contracts import TaskContractVersion, TaskRun
 
-        if not isinstance(contract_version, TaskContractVersion):
-            raise TypeError("contract_version must be a TaskContractVersion")
-        normalized_run_id = _require_nonblank(run_id, "run_id")
-        if normalized_run_id in self._runs:
-            raise LifecycleTransitionError(
-                f"run is already registered: {normalized_run_id!r}"
+        with self._lock:
+            if not isinstance(contract_version, TaskContractVersion):
+                raise TypeError("contract_version must be a TaskContractVersion")
+            normalized_run_id = _require_nonblank(run_id, "run_id")
+            if normalized_run_id in self._runs:
+                raise LifecycleTransitionError(
+                    f"run is already registered: {normalized_run_id!r}"
+                )
+            run = TaskRun(
+                run_id=normalized_run_id,
+                contract_version=contract_version,
+                status=status,
+                fix_round=fix_round,
             )
-        run = TaskRun(
-            run_id=normalized_run_id,
-            contract_version=contract_version,
-            status=status,
-            fix_round=fix_round,
-        )
-        self._runs[normalized_run_id] = run
-        return run
+            self._runs[normalized_run_id] = run
+            return run
 
     def get(self, run_id: str) -> Any:
-        normalized_run_id = _require_nonblank(run_id, "run_id")
-        try:
-            return self._runs[normalized_run_id]
-        except KeyError as exc:
-            raise LifecycleTransitionError(
-                f"run is not registered: {normalized_run_id!r}"
-            ) from exc
+        with self._lock:
+            normalized_run_id = _require_nonblank(run_id, "run_id")
+            try:
+                return self._runs[normalized_run_id]
+            except KeyError as exc:
+                raise LifecycleTransitionError(
+                    f"run is not registered: {normalized_run_id!r}"
+                ) from exc
 
     def is_registered(self, run: Any) -> bool:
         from .contracts import TaskRun
 
-        return (
-            type(run) is TaskRun
-            and self._runs.get(run.run_id) is run
-        )
+        with self._lock:
+            return type(run) is TaskRun and self._runs.get(run.run_id) is run
 
     def require_registered(self, run: Any) -> Any:
-        if not self.is_registered(run):
-            raise LifecycleTransitionError(
-                "transition requires a registered run snapshot"
-            )
-        return run
+        with self._lock:
+            if not self.is_registered(run):
+                raise LifecycleTransitionError(
+                    "transition requires a registered run snapshot"
+                )
+            return run
 
     def require_record(self, record: Any) -> Any:
         from .contracts import TaskRecord
 
-        if type(record) is not TaskRecord:
-            raise TypeError("record must be a TaskRecord")
+        with self._lock:
+            if type(record) is not TaskRecord:
+                raise TypeError("record must be a TaskRecord")
 
-        for run in record.runs:
+            for run in record.runs:
+                self.require_registered(run)
+                if run.is_active and run.contract_version != record.contract_version:
+                    raise LifecycleStateConflictError(
+                        "active run contract version does not match the task record"
+                    )
+            return record
+
+    @property
+    def events(self) -> tuple[Any, ...]:
+        """Accepted lifecycle events in commit order."""
+
+        with self._lock:
+            return tuple(self._events)
+
+    def _bind_event(
+        self,
+        event: Any,
+        run: Any,
+        actor_resolver: TrustedActorResolver,
+        actor: ActorPrincipal,
+    ) -> None:
+        from .contracts import TaskEvent
+
+        if type(event) is not TaskEvent:
+            raise TypeError("only a TaskEvent can be bound to the lifecycle registry")
+        if not isinstance(actor_resolver, TrustedActorResolver):
+            raise TypeError("event binding requires a TrustedActorResolver")
+        if type(actor) is not ActorPrincipal:
+            raise UnauthorizedActorError("event binding requires a trusted principal")
+
+        with self._lock:
             self.require_registered(run)
-            if run.is_active and run.contract_version != record.contract_version:
-                raise LifecycleStateConflictError(
-                    "active run contract version does not match the task record"
+            if event.event_id in self._event_ids or any(
+                pending[0].event_id == event.event_id
+                for pending in self._pending_events.values()
+            ):
+                raise LifecycleTransitionError(
+                    f"event id is already registered: {event.event_id!r}"
                 )
-        return record
-
-    def commit_transition(
-        self,
-        run: Any,
-        *,
-        new_state: TaskStatus,
-        fix_round: int,
-        _lifecycle_token: object | None = None,
-    ) -> Any:
-        from .contracts import TaskRun
-
-        if _lifecycle_token is not _LIFECYCLE_MUTATION_TOKEN:
-            raise TypeError(
-                "registry transitions can only be committed by the lifecycle"
-            )
-        self.require_registered(run)
-        if not run.is_active:
-            raise LifecycleTransitionError(
-                f"stale or inactive run cannot transition: {run.run_id!r}"
-            )
-        if not isinstance(new_state, TaskStatus):
-            raise TypeError("new_state must be a TaskStatus")
-        if not isinstance(fix_round, int) or isinstance(fix_round, bool) or fix_round < 0:
-            raise ValueError("fix_round must be a non-negative integer")
-        if fix_round > run.contract_version.contract.max_fix_rounds:
-            raise ValueError("fix_round exceeds the contract max_fix_rounds")
-        if fix_round not in (run.fix_round, run.fix_round + 1):
-            raise LifecycleStateConflictError(
-                "fix_round must be derived from the current run snapshot"
+            self._pending_events[id(event)] = (
+                event,
+                run,
+                actor_resolver,
+                actor,
             )
 
-        updated = run.model_copy(
-            update={"status": new_state, "fix_round": fix_round}
-        )
-        if not isinstance(updated, TaskRun):
-            raise TypeError("registry could not produce a TaskRun snapshot")
-        self._runs[run.run_id] = updated
-        return updated
+    def _commit_event(self, run: Any, event: Any) -> Any:
+        from .contracts import TaskRun, TaskEvent
 
-    def record_failure(
-        self,
-        run: Any,
-        failure_fact: FailureFact,
-        *,
-        _lifecycle_token: object | None = None,
-    ) -> Any:
-        if _lifecycle_token is not _LIFECYCLE_MUTATION_TOKEN:
-            raise TypeError(
-                "failure facts can only be recorded by the lifecycle"
-            )
-        self.require_registered(run)
-        if failure_fact.run_id != run.run_id:
-            raise LifecycleStateConflictError("failure fact run does not match snapshot")
-        if failure_fact.task_id != run.task_id:
-            raise LifecycleStateConflictError("failure fact task does not match snapshot")
-        if failure_fact.contract_version != run.contract_version.version:
-            raise LifecycleStateConflictError(
-                "failure fact contract version does not match the run snapshot"
-            )
-        if failure_fact.fix_round != run.fix_round:
-            raise LifecycleStateConflictError(
-                "failure fact fix round does not match the run snapshot"
-            )
-        if (
-            failure_fact.kind is not FailureFactKind.MAX_FIX_ROUNDS_EXCEEDED
-            or failure_fact.max_fix_rounds
-            != run.contract_version.contract.max_fix_rounds
-        ):
-            raise LifecycleStateConflictError(
-                "failure fact does not match the run contract limit"
-            )
-        updated = run.model_copy(
-            update={"failure_facts": (*run.failure_facts, failure_fact)}
-        )
-        self._runs[run.run_id] = updated
-        return updated
+        if type(event) is not TaskEvent:
+            raise TypeError("lifecycle commit requires a TaskEvent")
 
-    def stale_active_runs(
-        self,
-        task_id: str,
-        *,
-        _lifecycle_token: object | None = None,
-    ) -> tuple[Any, ...]:
-        if _lifecycle_token is not _LIFECYCLE_MUTATION_TOKEN:
-            raise TypeError(
-                "run invalidation can only be performed by the lifecycle"
+        with self._lock:
+            binding = self._pending_events.get(id(event))
+            if binding is None or binding[0] is not event or binding[1] is not run:
+                raise LifecycleTransitionError(
+                    "event was not issued and bound by the lifecycle factory"
+                )
+
+            committed = False
+            try:
+                self.require_registered(run)
+                if not run.is_active:
+                    raise LifecycleTransitionError(
+                        f"stale or inactive run cannot transition: {run.run_id!r}"
+                    )
+
+                _require_nonblank(event.event_id, "event_id")
+                _require_nonblank(event.task_id, "task_id")
+                _require_nonblank(event.event_name, "event")
+                _require_nonblank(event.actor, "actor")
+                _require_nonblank(event.run_id, "run_id")
+                if (
+                    not isinstance(event.contract_version, int)
+                    or isinstance(event.contract_version, bool)
+                    or event.contract_version < 1
+                ):
+                    raise LifecycleTransitionError(
+                        "contract version must be a positive integer"
+                    )
+
+                _event, _bound_run, actor_resolver, actor = binding
+                authority = actor_resolver.resolve(actor)
+                if actor.actor_id != event.actor or authority is not event.authority:
+                    raise UnauthorizedActorError(
+                        "event actor authority does not match the trusted principal"
+                    )
+                if event.task_id != run.task_id:
+                    raise LifecycleStateConflictError(
+                        "event task does not match the registered run"
+                    )
+                if event.run_id != run.run_id:
+                    raise LifecycleStateConflictError(
+                        "event run does not match the registered run"
+                    )
+                if event.contract_version != run.contract_version.version:
+                    raise LifecycleStateConflictError(
+                        "event contract version does not match the registered run"
+                    )
+                if event.previous_state is not run.status:
+                    raise LifecycleStateConflictError(
+                        "event previous state does not match the registered run"
+                    )
+                if event.expected_previous_state is not run.status:
+                    raise LifecycleStateConflictError(
+                        "event expected previous state does not match the registered run"
+                    )
+
+                TaskLifecycle._validate_authority(authority, event.event_name)
+                derived_state = TaskLifecycle._derive(run.status, event.event_name)
+                if event.new_state is not derived_state:
+                    raise LifecycleStateConflictError(
+                        "event new state is not derived from the transition table"
+                    )
+
+                max_fix_rounds = run.contract_version.contract.max_fix_rounds
+                expected_fix_round = run.fix_round
+                if (run.status, event.event_name) in TaskLifecycle._FIX_ROUND_TRANSITIONS:
+                    if run.fix_round >= max_fix_rounds:
+                        raise FixRoundLimitExceeded(
+                            FailureFact(
+                                kind=FailureFactKind.MAX_FIX_ROUNDS_EXCEEDED,
+                                task_id=run.task_id,
+                                run_id=run.run_id,
+                                contract_version=run.contract_version.version,
+                                fix_round=run.fix_round,
+                                max_fix_rounds=max_fix_rounds,
+                                reason="new fix round rejected at the contract limit",
+                            )
+                        )
+                    expected_fix_round += 1
+                if event.fix_round != expected_fix_round:
+                    raise LifecycleStateConflictError(
+                        "event fix round is not derived from the registered run"
+                    )
+                if event.event_id in self._event_ids:
+                    raise LifecycleTransitionError(
+                        f"event id is already committed: {event.event_id!r}"
+                    )
+
+                updated = run.model_copy(
+                    update={
+                        "status": derived_state,
+                        "fix_round": expected_fix_round,
+                    }
+                )
+                if not isinstance(updated, TaskRun):
+                    raise TypeError("registry could not produce a TaskRun snapshot")
+                self._runs[run.run_id] = updated
+                self._events.append(event)
+                self._event_ids.add(event.event_id)
+                committed = True
+                return updated
+            finally:
+                if not committed:
+                    self._pending_events.pop(id(event), None)
+
+    def _record_failure(self, run: Any, failure_fact: FailureFact) -> Any:
+        with self._lock:
+            self.require_registered(run)
+            if failure_fact.run_id != run.run_id:
+                raise LifecycleStateConflictError("failure fact run does not match snapshot")
+            if failure_fact.task_id != run.task_id:
+                raise LifecycleStateConflictError("failure fact task does not match snapshot")
+            if failure_fact.contract_version != run.contract_version.version:
+                raise LifecycleStateConflictError(
+                    "failure fact contract version does not match the run snapshot"
+                )
+            if failure_fact.fix_round != run.fix_round:
+                raise LifecycleStateConflictError(
+                    "failure fact fix round does not match the run snapshot"
+                )
+            if (
+                failure_fact.kind is not FailureFactKind.MAX_FIX_ROUNDS_EXCEEDED
+                or failure_fact.max_fix_rounds
+                != run.contract_version.contract.max_fix_rounds
+            ):
+                raise LifecycleStateConflictError(
+                    "failure fact does not match the run contract limit"
+                )
+            updated = run.model_copy(
+                update={"failure_facts": (*run.failure_facts, failure_fact)}
             )
-        normalized_task_id = _require_nonblank(task_id, "task_id")
-        stale_runs: list[Any] = []
-        for run_id, run in tuple(self._runs.items()):
-            if run.task_id != normalized_task_id or not run.is_active:
-                continue
-            updated = run.model_copy(update={"status": TaskStatus.STALE})
-            self._runs[run_id] = updated
-            stale_runs.append(updated)
-        return tuple(stale_runs)
+            self._runs[run.run_id] = updated
+            return updated
+
+    def _stale_active_runs(self, task_id: str) -> tuple[Any, ...]:
+        with self._lock:
+            normalized_task_id = _require_nonblank(task_id, "task_id")
+            stale_runs: list[Any] = []
+            for run_id, run in tuple(self._runs.items()):
+                if run.task_id != normalized_task_id or not run.is_active:
+                    continue
+                updated = run.model_copy(update={"status": TaskStatus.STALE})
+                self._runs[run_id] = updated
+                stale_runs.append(updated)
+            return tuple(stale_runs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -586,6 +674,12 @@ class TaskLifecycle:
                 f"illegal lifecycle transition from {current_status.value!r} using {event!r}"
             ) from exc
 
+    @classmethod
+    def derive(cls, current: TaskStatus, event: str) -> TaskStatus:
+        """Pure transition-table lookup without actor or registry side effects."""
+
+        return cls._derive(current, event)
+
     def _trusted_run(self, run: Any) -> Any:
         registered_run = self._context.run_registry.require_registered(run)
         if not registered_run.is_active:
@@ -595,6 +689,24 @@ class TaskLifecycle:
         return registered_run
 
     def apply(
+        self,
+        run: Any,
+        event: str,
+        *,
+        event_id: str,
+        actor: ActorPrincipal,
+        expected_previous_state: TaskStatus,
+    ) -> Any:
+        with self._context.run_registry._lock:
+            return self._apply_locked(
+                run,
+                event,
+                event_id=event_id,
+                actor=actor,
+                expected_previous_state=expected_previous_state,
+            )
+
+    def _apply_locked(
         self,
         run: Any,
         event: str,
@@ -644,11 +756,7 @@ class TaskLifecycle:
                     max_fix_rounds=max_fix_rounds,
                     reason="new fix round rejected at the contract limit",
                 )
-                self._context.run_registry.record_failure(
-                    trusted_run,
-                    failure_fact,
-                    _lifecycle_token=_LIFECYCLE_MUTATION_TOKEN,
-                )
+                self._context.run_registry._record_failure(trusted_run, failure_fact)
                 raise FixRoundLimitExceeded(failure_fact)
 
         audited_event = TaskEvent._from_lifecycle(
@@ -660,12 +768,7 @@ class TaskLifecycle:
             actor=actor,
             expected_previous_state=expected_status,
         )
-        self._context.run_registry.commit_transition(
-            trusted_run,
-            new_state=audited_event.new_state,
-            fix_round=audited_event.fix_round,
-            _lifecycle_token=_LIFECYCLE_MUTATION_TOKEN,
-        )
+        self._context.run_registry._commit_event(trusted_run, audited_event)
         return audited_event
 
     def transition(
@@ -694,10 +797,8 @@ class TaskLifecycle:
 
         if not isinstance(record, TaskRecord):
             raise TypeError("record must be a TaskRecord")
-        self._context.run_registry.require_record(record)
-        updated_record = record.with_contract(contract_version)
-        self._context.run_registry.stale_active_runs(
-            record.task_id,
-            _lifecycle_token=_LIFECYCLE_MUTATION_TOKEN,
-        )
-        return updated_record
+        with self._context.run_registry._lock:
+            self._context.run_registry.require_record(record)
+            updated_record = record.with_contract(contract_version)
+            self._context.run_registry._stale_active_runs(record.task_id)
+            return updated_record

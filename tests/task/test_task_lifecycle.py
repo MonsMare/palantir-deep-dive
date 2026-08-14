@@ -1,3 +1,5 @@
+import importlib
+import threading
 from types import MappingProxyType
 
 import pytest
@@ -8,6 +10,7 @@ from aifde.task.contracts import (
     TaskContractVersion,
     TaskEvent,
     TaskRecord,
+    TaskRun,
 )
 from aifde.task.lifecycle import (
     ActorAuthority,
@@ -154,9 +157,19 @@ def test_transition_rejects_a_caller_supplied_authority_policy():
         )
 
 
-def test_trusted_resolver_rejects_agent_identity_bound_as_human():
-    with pytest.raises(ValueError, match="agent.*human"):
-        TrustedActorResolver.from_static({"agent-1": ActorAuthority.HUMAN})
+def test_trusted_resolver_uses_bound_authority_not_actor_name():
+    resolver = TrustedActorResolver.from_static({"agent-1": ActorAuthority.HUMAN})
+
+    assert resolver.resolve(resolver.issue("agent-1")) is ActorAuthority.HUMAN
+
+
+def test_agent_principal_bound_as_agent_cannot_self_escalate():
+    resolver = TrustedActorResolver.from_static({"worker-1": ActorAuthority.AGENT})
+    principal = resolver.issue("worker-1")
+
+    assert resolver.resolve(principal) is ActorAuthority.AGENT
+    with pytest.raises(AttributeError, match="immutable"):
+        principal._authority = ActorAuthority.HUMAN
 
 
 @pytest.mark.parametrize(
@@ -456,6 +469,108 @@ def test_transition_table_is_immutable():
         TaskLifecycle._TRANSITIONS[(TaskStatus.REVIEWING, "forged")] = TaskStatus.RELEASED
 
 
+def test_lifecycle_authorization_does_not_use_importable_sentinels():
+    contracts_module = importlib.import_module("aifde.task.contracts")
+    lifecycle_module = importlib.import_module("aifde.task.lifecycle")
+
+    assert not hasattr(contracts_module, "_TASK_EVENT_TOKEN")
+    assert not hasattr(lifecycle_module, "_LIFECYCLE_MUTATION_TOKEN")
+
+
+def test_task_event_model_apis_cannot_forge_or_copy_an_accepted_event():
+    lifecycle, registry, resolver, _version = _context()
+    event = lifecycle.apply(
+        registry.get("run-1"),
+        "gates_pass",
+        **_kwargs(resolver),
+    )
+
+    with pytest.raises(TypeError, match="lifecycle"):
+        TaskEvent.model_validate(event.model_dump())
+
+    with pytest.raises(TypeError, match="lifecycle"):
+        TaskEvent.model_construct(**event.model_dump())
+
+    with pytest.raises(TypeError, match="lifecycle"):
+        event.model_copy()
+
+    assert registry.events == (event,)
+
+
+def test_registry_has_no_public_transition_mutation_api():
+    _lifecycle, registry, _resolver, _version = _context()
+
+    assert not hasattr(registry, "commit_transition")
+
+
+def test_concurrent_transitions_accept_one_event_and_one_final_state():
+    lifecycle, registry, resolver, _version = _context()
+    run = registry.get("run-1")
+    start = threading.Barrier(3)
+    accepted = []
+    failures = []
+
+    def worker(event_id):
+        start.wait()
+        try:
+            accepted.append(
+                lifecycle.apply(
+                    run,
+                    "gates_pass",
+                    **_kwargs(resolver, event_id=event_id),
+                )
+            )
+        except LifecycleTransitionError as error:
+            failures.append(error)
+
+    threads = [
+        threading.Thread(target=worker, args=("event-concurrent-1",)),
+        threading.Thread(target=worker, args=("event-concurrent-2",)),
+    ]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    for thread in threads:
+        thread.join()
+
+    assert len(accepted) == 1
+    assert len(failures) == 1
+    assert registry.events == (accepted[0],)
+    assert registry.get("run-1").status is accepted[0].new_state
+
+
+def test_task_record_rejects_active_run_with_mismatched_contract_version():
+    contract_v1 = _contract()
+    version_v1 = TaskContractVersion(contract=contract_v1, version=1)
+    version_v2 = TaskContractVersion(
+        contract=_contract(objective="预测工期（修订）"),
+        version=2,
+    )
+    active_run = TaskRun(
+        run_id="run-1",
+        contract_version=version_v1,
+        status=TaskStatus.RUNNING,
+    )
+
+    with pytest.raises(ValidationError, match="active run"):
+        TaskRecord(
+            task_id=contract_v1.task_id,
+            contract_version=version_v2,
+            status=TaskStatus.RUNNING,
+            runs=(active_run,),
+        )
+
+
+def test_derive_is_pure_and_separate_from_governed_apply():
+    assert (
+        TaskLifecycle.derive(TaskStatus.REVIEWING, "gates_pass")
+        is TaskStatus.AWAITING_HUMAN
+    )
+
+    with pytest.raises(LifecycleTransitionError):
+        TaskLifecycle.derive(TaskStatus.REVIEWING, "agent_done")
+
+
 def test_task_event_factory_resolves_authority_from_trusted_principal():
     lifecycle, registry, resolver, _version = _context(
         status=TaskStatus.AWAITING_HUMAN
@@ -496,15 +611,10 @@ def test_task_event_factory_rejects_self_reported_authority_fields():
 
 
 def test_registry_cannot_commit_a_transition_without_lifecycle_authorization():
-    lifecycle, registry, resolver, _version = _context()
-    run = registry.get("run-1")
+    _lifecycle, registry, _resolver, _version = _context()
 
-    with pytest.raises(TypeError, match="lifecycle"):
-        registry.commit_transition(
-            run,
-            new_state=TaskStatus.RELEASED,
-            fix_round=0,
-        )
+    with pytest.raises(AttributeError):
+        getattr(registry, "commit_transition")
 
 
 def test_update_contract_rejects_forged_run_snapshots():

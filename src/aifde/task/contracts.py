@@ -27,10 +27,6 @@ from .lifecycle import (
     TrustedActorResolver,
 )
 
-
-_TASK_EVENT_TOKEN = object()
-
-
 def _normalize_nonblank(value: str, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must not be empty")
@@ -206,6 +202,10 @@ class TaskRecord(BaseModel):
         for run in self.runs:
             if run.task_id != self.task_id:
                 raise ValueError("every run must belong to the task record")
+            if run.is_active and run.contract_version != self.contract_version:
+                raise ValueError(
+                    "active run contract version must match the task record"
+                )
 
         if self.run_id is not None:
             matching_runs = tuple(run for run in self.runs if run.run_id == self.run_id)
@@ -274,10 +274,7 @@ class TaskEvent(BaseModel):
     fix_round: int = Field(ge=0)
 
     def __init__(self, **data: Any) -> None:
-        token = data.pop("_lifecycle_token", None)
-        if token is not _TASK_EVENT_TOKEN:
-            raise TypeError("TaskEvent can only be created by the trusted lifecycle")
-        super().__init__(**data)
+        raise TypeError("TaskEvent can only be created by the trusted lifecycle")
 
     @classmethod
     def model_construct(
@@ -285,10 +282,7 @@ class TaskEvent(BaseModel):
         _fields_set: set[str] | None = None,
         **values: Any,
     ) -> "TaskEvent":
-        token = values.pop("_lifecycle_token", None)
-        if token is not _TASK_EVENT_TOKEN:
-            raise TypeError("TaskEvent can only be constructed by the trusted lifecycle")
-        return super().model_construct(_fields_set=_fields_set, **values)
+        raise TypeError("TaskEvent can only be constructed by the trusted lifecycle")
 
     def model_copy(
         self,
@@ -296,9 +290,7 @@ class TaskEvent(BaseModel):
         update: dict[str, Any] | None = None,
         deep: bool = False,
     ) -> "TaskEvent":
-        if update:
-            raise TypeError("TaskEvent copies cannot be modified outside the lifecycle")
-        return super().model_copy(deep=deep)
+        raise TypeError("TaskEvent copies cannot be created outside the lifecycle")
 
     @classmethod
     def _from_lifecycle(
@@ -372,8 +364,19 @@ class TaskEvent(BaseModel):
                 )
             next_fix_round += 1
 
-        return cls(
-            _lifecycle_token=_TASK_EVENT_TOKEN,
+        event = super(TaskEvent, cls).model_construct(
+            _fields_set={
+                "event_id",
+                "task_id",
+                "event_name",
+                "actor",
+                "authority",
+                "previous_state",
+                "expected_previous_state",
+                "run_id",
+                "contract_version",
+                "fix_round",
+            },
             event_id=normalized_event_id,
             task_id=trusted_run.task_id,
             event_name=normalized_event,
@@ -385,6 +388,8 @@ class TaskEvent(BaseModel):
             contract_version=trusted_run.contract_version.version,
             fix_round=next_fix_round,
         )
+        registry._bind_event(event, trusted_run, actor_resolver, actor)
+        return event
 
     @field_validator("event_id", "task_id", "event_name", "actor", "run_id")
     @classmethod
