@@ -26,6 +26,8 @@ class CockpitSnapshot:
     open_questions: list[JsonDict] = field(default_factory=list)
     latest_diff: str | None = None
     actions: list[JsonDict] = field(default_factory=list)
+    dry_runs: list[JsonDict] = field(default_factory=list)
+    reconciliations: list[JsonDict] = field(default_factory=list)
 
     @property
     def current_stage(self) -> JsonDict | None:
@@ -72,6 +74,8 @@ def load_project_cockpit(
     open_questions = _optional_list(fetch, f"/projects/{encoded}/open-questions")
     latest_diff = _optional_text(fetch, f"/projects/{encoded}/latest-diff")
     actions = _optional_list(fetch, f"/projects/{encoded}/actions")
+    dry_runs = _optional_list(fetch, f"/projects/{encoded}/action-dry-runs")
+    reconciliations = _optional_list(fetch, f"/projects/{encoded}/reconciliations")
 
     if latest_diff is None and artifacts:
         latest_artifact = artifacts[-1]
@@ -90,6 +94,8 @@ def load_project_cockpit(
         open_questions=open_questions,
         latest_diff=latest_diff,
         actions=actions,
+        dry_runs=dry_runs,
+        reconciliations=reconciliations,
     )
 
 
@@ -157,6 +163,18 @@ def render_dashboard(
 
     st.subheader("Actions")
     _render_actions_read_only(st, snapshot.actions)
+
+    st.subheader("Dry-run receipts")
+    if snapshot.dry_runs:
+        st.table(snapshot.dry_runs)
+    else:
+        st.info("No dry-run receipts are available.")
+
+    st.subheader("Reconciliation")
+    if snapshot.reconciliations:
+        st.table(snapshot.reconciliations)
+    else:
+        st.info("No reconciliation records are available.")
 
     return snapshot
 

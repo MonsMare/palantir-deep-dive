@@ -18,6 +18,7 @@ def create_app(
     stage_runner: Any,
     action_broker: Any,
     policy: PolicyEngine | None = None,
+    governed_action_broker: Any | None = None,
 ) -> Any:
     """Build the HTTP app around the already-authoritative domain services."""
 
@@ -33,6 +34,7 @@ def create_app(
     app.state.gate_engine = gate_engine
     app.state.stage_runner = stage_runner
     app.state.action_broker = action_broker
+    app.state.governed_action_broker = governed_action_broker
     app.state.policy = policy or PolicyEngine()
     app.include_router(
         build_router(
@@ -41,6 +43,7 @@ def create_app(
             stage_runner=stage_runner,
             action_broker=action_broker,
             policy=app.state.policy,
+            governed_action_broker=governed_action_broker,
         )
     )
     return app
