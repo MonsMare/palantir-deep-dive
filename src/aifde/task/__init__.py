@@ -8,6 +8,7 @@ from .contracts import (
     TaskRun,
 )
 from .lifecycle import (
+    ActorPrincipal,
     ActorAuthority,
     AuthorityPolicy,
     FailureFact,
@@ -16,7 +17,11 @@ from .lifecycle import (
     LifecycleStateConflictError,
     LifecycleTransitionError,
     TaskLifecycle,
+    TaskLifecycleContext,
+    TaskRunRegistry,
     TaskStatus,
+    TrustedActorResolver,
+    TrustedPrincipal,
     UnauthorizedActorError,
 )
 
@@ -25,6 +30,7 @@ __all__ = [
     "LifecycleStateConflictError",
     "UnauthorizedActorError",
     "ActorAuthority",
+    "ActorPrincipal",
     "AuthorityPolicy",
     "FailureFact",
     "FailureFactKind",
@@ -33,7 +39,11 @@ __all__ = [
     "TaskContractVersion",
     "TaskEvent",
     "TaskLifecycle",
+    "TaskLifecycleContext",
     "TaskRecord",
+    "TaskRunRegistry",
     "TaskRun",
     "TaskStatus",
+    "TrustedActorResolver",
+    "TrustedPrincipal",
 ]

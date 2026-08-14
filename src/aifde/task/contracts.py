@@ -22,6 +22,9 @@ from .lifecycle import (
 )
 
 
+_TASK_EVENT_TOKEN = object()
+
+
 def _normalize_nonblank(value: str, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must not be empty")
@@ -120,6 +123,14 @@ class TaskRun(BaseModel):
     @property
     def is_active(self) -> bool:
         return self.status not in _TERMINAL_RUN_STATES
+
+    @model_validator(mode="after")
+    def validate_fix_round_against_contract(self) -> "TaskRun":
+        if self.fix_round > self.contract_version.contract.max_fix_rounds:
+            raise ValueError(
+                "fix_round cannot exceed contract max_fix_rounds"
+            )
+        return self
 
 
 class TaskRecord(BaseModel):
@@ -234,7 +245,14 @@ class TaskRecord(BaseModel):
 
 
 class TaskEvent(BaseModel):
-    """An immutable, audited event whose new state is always system-derived."""
+    """An immutable event issued only by the trusted lifecycle factory.
+
+    A caller-supplied ``authority`` is not an authentication mechanism.  The
+    normal constructor therefore rejects all inputs; ``TaskLifecycle`` uses
+    the private factory below after resolving a principal against its bound
+    resolver.  Persistence adapters should accept only events produced this
+    way (and re-check the actor binding if they deserialize untrusted data).
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -248,6 +266,37 @@ class TaskEvent(BaseModel):
     run_id: str
     contract_version: int = Field(ge=1)
     fix_round: int = Field(ge=0)
+
+    def __init__(self, **data: Any) -> None:
+        token = data.pop("_lifecycle_token", None)
+        if token is not _TASK_EVENT_TOKEN:
+            raise TypeError("TaskEvent can only be created by the trusted lifecycle")
+        super().__init__(**data)
+
+    @classmethod
+    def model_construct(
+        cls,
+        _fields_set: set[str] | None = None,
+        **values: Any,
+    ) -> "TaskEvent":
+        token = values.pop("_lifecycle_token", None)
+        if token is not _TASK_EVENT_TOKEN:
+            raise TypeError("TaskEvent can only be constructed by the trusted lifecycle")
+        return super().model_construct(_fields_set=_fields_set, **values)
+
+    def model_copy(
+        self,
+        *,
+        update: dict[str, Any] | None = None,
+        deep: bool = False,
+    ) -> "TaskEvent":
+        if update:
+            raise TypeError("TaskEvent copies cannot be modified outside the lifecycle")
+        return super().model_copy(deep=deep)
+
+    @classmethod
+    def _from_lifecycle(cls, **data: Any) -> "TaskEvent":
+        return cls(_lifecycle_token=_TASK_EVENT_TOKEN, **data)
 
     @field_validator("event_id", "task_id", "event_name", "actor", "run_id")
     @classmethod
