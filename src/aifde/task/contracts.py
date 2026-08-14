@@ -16,9 +16,15 @@ from pydantic import (
 
 from .lifecycle import (
     ActorAuthority,
+    ActorPrincipal,
     FailureFact,
     FailureFactKind,
+    FixRoundLimitExceeded,
+    LifecycleStateConflictError,
+    LifecycleTransitionError,
+    TaskRunRegistry,
     TaskStatus,
+    TrustedActorResolver,
 )
 
 
@@ -295,8 +301,90 @@ class TaskEvent(BaseModel):
         return super().model_copy(deep=deep)
 
     @classmethod
-    def _from_lifecycle(cls, **data: Any) -> "TaskEvent":
-        return cls(_lifecycle_token=_TASK_EVENT_TOKEN, **data)
+    def _from_lifecycle(
+        cls,
+        *,
+        event_id: str,
+        event_name: str,
+        run: Any,
+        registry: TaskRunRegistry,
+        actor_resolver: TrustedActorResolver,
+        actor: ActorPrincipal,
+        expected_previous_state: TaskStatus,
+    ) -> "TaskEvent":
+        """Create an event from trusted lifecycle dependencies only.
+
+        Audit identity, authority, contract metadata and fix round are all
+        derived here.  The factory intentionally has no parameters for those
+        fields, so a caller cannot turn a self-reported authority mapping or a
+        copied run into an approval event.
+        """
+
+        from .lifecycle import TaskLifecycle
+
+        if not isinstance(registry, TaskRunRegistry):
+            raise TypeError("event factory requires a TaskRunRegistry")
+        if not isinstance(actor_resolver, TrustedActorResolver):
+            raise TypeError("event factory requires a TrustedActorResolver")
+
+        trusted_run = registry.require_registered(run)
+        if not trusted_run.is_active:
+            raise LifecycleTransitionError(
+                f"stale or inactive run cannot issue events: {trusted_run.run_id!r}"
+            )
+
+        try:
+            normalized_event_id = _normalize_nonblank(event_id, "event_id")
+            normalized_event = _normalize_nonblank(event_name, "event")
+        except ValueError as exc:
+            raise LifecycleTransitionError(str(exc)) from exc
+
+        current_status = TaskLifecycle._status(trusted_run.status, "run state")
+        expected_status = TaskLifecycle._status(
+            expected_previous_state,
+            "expected previous state",
+        )
+        if current_status is not expected_status:
+            raise LifecycleStateConflictError(
+                "expected previous state "
+                f"{expected_status.value!r} does not match run state "
+                f"{current_status.value!r}"
+            )
+
+        authority = actor_resolver.resolve(actor)
+        TaskLifecycle._validate_authority(authority, normalized_event)
+        TaskLifecycle._derive(current_status, normalized_event)
+
+        next_fix_round = trusted_run.fix_round
+        if (current_status, normalized_event) in TaskLifecycle._FIX_ROUND_TRANSITIONS:
+            max_fix_rounds = trusted_run.contract_version.contract.max_fix_rounds
+            if trusted_run.fix_round >= max_fix_rounds:
+                raise FixRoundLimitExceeded(
+                    FailureFact(
+                        kind=FailureFactKind.MAX_FIX_ROUNDS_EXCEEDED,
+                        task_id=trusted_run.task_id,
+                        run_id=trusted_run.run_id,
+                        contract_version=trusted_run.contract_version.version,
+                        fix_round=trusted_run.fix_round,
+                        max_fix_rounds=max_fix_rounds,
+                        reason="new fix round rejected at the contract limit",
+                    )
+                )
+            next_fix_round += 1
+
+        return cls(
+            _lifecycle_token=_TASK_EVENT_TOKEN,
+            event_id=normalized_event_id,
+            task_id=trusted_run.task_id,
+            event_name=normalized_event,
+            actor=actor.actor_id,
+            authority=authority,
+            previous_state=current_status,
+            expected_previous_state=expected_status,
+            run_id=trusted_run.run_id,
+            contract_version=trusted_run.contract_version.version,
+            fix_round=next_fix_round,
+        )
 
     @field_validator("event_id", "task_id", "event_name", "actor", "run_id")
     @classmethod

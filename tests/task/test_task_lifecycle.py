@@ -454,3 +454,72 @@ def test_transition_table_is_immutable():
     assert isinstance(TaskLifecycle._TRANSITIONS, MappingProxyType)
     with pytest.raises(TypeError):
         TaskLifecycle._TRANSITIONS[(TaskStatus.REVIEWING, "forged")] = TaskStatus.RELEASED
+
+
+def test_task_event_factory_resolves_authority_from_trusted_principal():
+    lifecycle, registry, resolver, _version = _context(
+        status=TaskStatus.AWAITING_HUMAN
+    )
+    run = registry.get("run-1")
+
+    with pytest.raises(UnauthorizedActorError, match="human authority"):
+        TaskEvent._from_lifecycle(
+            event_id="event-forged-approval",
+            event_name="authorized_approval",
+            run=run,
+            registry=registry,
+            actor_resolver=resolver,
+            actor=resolver.issue("agent-1"),
+            expected_previous_state=TaskStatus.AWAITING_HUMAN,
+        )
+
+
+def test_task_event_factory_rejects_self_reported_authority_fields():
+    lifecycle, registry, resolver, _version = _context(
+        status=TaskStatus.AWAITING_HUMAN
+    )
+    run = registry.get("run-1")
+
+    with pytest.raises(TypeError):
+        TaskEvent._from_lifecycle(
+            event_id="event-self-reported",
+            task_id=run.task_id,
+            event_name="authorized_approval",
+            actor="agent-1",
+            authority=ActorAuthority.HUMAN,
+            previous_state=TaskStatus.AWAITING_HUMAN,
+            expected_previous_state=TaskStatus.AWAITING_HUMAN,
+            run_id=run.run_id,
+            contract_version=run.contract_version.version,
+            fix_round=0,
+        )
+
+
+def test_registry_cannot_commit_a_transition_without_lifecycle_authorization():
+    lifecycle, registry, resolver, _version = _context()
+    run = registry.get("run-1")
+
+    with pytest.raises(TypeError, match="lifecycle"):
+        registry.commit_transition(
+            run,
+            new_state=TaskStatus.RELEASED,
+            fix_round=0,
+        )
+
+
+def test_update_contract_rejects_forged_run_snapshots():
+    lifecycle, registry, resolver, version_v1 = _context(status=TaskStatus.RUNNING)
+    forged_run = registry.get("run-1").model_copy()
+    record = TaskRecord(
+        task_id=version_v1.contract.task_id,
+        contract_version=version_v1,
+        status=TaskStatus.RUNNING,
+        runs=(forged_run,),
+    )
+    version_v2 = TaskContractVersion(
+        contract=_contract(objective="预测工期（修订）"),
+        version=2,
+    )
+
+    with pytest.raises(LifecycleTransitionError, match="registered"):
+        lifecycle.update_contract(record, version_v2)

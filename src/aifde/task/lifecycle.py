@@ -94,6 +94,7 @@ class FailureFact(BaseModel):
 
 _PRINCIPAL_TOKEN = object()
 _RESOLVER_TOKEN = object()
+_LIFECYCLE_MUTATION_TOKEN = object()
 
 
 class ActorPrincipal:
@@ -343,22 +344,49 @@ class TaskRunRegistry:
             )
         return run
 
+    def require_record(self, record: Any) -> Any:
+        from .contracts import TaskRecord
+
+        if type(record) is not TaskRecord:
+            raise TypeError("record must be a TaskRecord")
+
+        for run in record.runs:
+            self.require_registered(run)
+            if run.is_active and run.contract_version != record.contract_version:
+                raise LifecycleStateConflictError(
+                    "active run contract version does not match the task record"
+                )
+        return record
+
     def commit_transition(
         self,
         run: Any,
         *,
         new_state: TaskStatus,
         fix_round: int,
+        _lifecycle_token: object | None = None,
     ) -> Any:
         from .contracts import TaskRun
 
+        if _lifecycle_token is not _LIFECYCLE_MUTATION_TOKEN:
+            raise TypeError(
+                "registry transitions can only be committed by the lifecycle"
+            )
         self.require_registered(run)
+        if not run.is_active:
+            raise LifecycleTransitionError(
+                f"stale or inactive run cannot transition: {run.run_id!r}"
+            )
         if not isinstance(new_state, TaskStatus):
             raise TypeError("new_state must be a TaskStatus")
         if not isinstance(fix_round, int) or isinstance(fix_round, bool) or fix_round < 0:
             raise ValueError("fix_round must be a non-negative integer")
         if fix_round > run.contract_version.contract.max_fix_rounds:
             raise ValueError("fix_round exceeds the contract max_fix_rounds")
+        if fix_round not in (run.fix_round, run.fix_round + 1):
+            raise LifecycleStateConflictError(
+                "fix_round must be derived from the current run snapshot"
+            )
 
         updated = run.model_copy(
             update={"status": new_state, "fix_round": fix_round}
@@ -368,19 +396,54 @@ class TaskRunRegistry:
         self._runs[run.run_id] = updated
         return updated
 
-    def record_failure(self, run: Any, failure_fact: FailureFact) -> Any:
+    def record_failure(
+        self,
+        run: Any,
+        failure_fact: FailureFact,
+        *,
+        _lifecycle_token: object | None = None,
+    ) -> Any:
+        if _lifecycle_token is not _LIFECYCLE_MUTATION_TOKEN:
+            raise TypeError(
+                "failure facts can only be recorded by the lifecycle"
+            )
         self.require_registered(run)
         if failure_fact.run_id != run.run_id:
             raise LifecycleStateConflictError("failure fact run does not match snapshot")
         if failure_fact.task_id != run.task_id:
             raise LifecycleStateConflictError("failure fact task does not match snapshot")
+        if failure_fact.contract_version != run.contract_version.version:
+            raise LifecycleStateConflictError(
+                "failure fact contract version does not match the run snapshot"
+            )
+        if failure_fact.fix_round != run.fix_round:
+            raise LifecycleStateConflictError(
+                "failure fact fix round does not match the run snapshot"
+            )
+        if (
+            failure_fact.kind is not FailureFactKind.MAX_FIX_ROUNDS_EXCEEDED
+            or failure_fact.max_fix_rounds
+            != run.contract_version.contract.max_fix_rounds
+        ):
+            raise LifecycleStateConflictError(
+                "failure fact does not match the run contract limit"
+            )
         updated = run.model_copy(
             update={"failure_facts": (*run.failure_facts, failure_fact)}
         )
         self._runs[run.run_id] = updated
         return updated
 
-    def stale_active_runs(self, task_id: str) -> tuple[Any, ...]:
+    def stale_active_runs(
+        self,
+        task_id: str,
+        *,
+        _lifecycle_token: object | None = None,
+    ) -> tuple[Any, ...]:
+        if _lifecycle_token is not _LIFECYCLE_MUTATION_TOKEN:
+            raise TypeError(
+                "run invalidation can only be performed by the lifecycle"
+            )
         normalized_task_id = _require_nonblank(task_id, "task_id")
         stale_runs: list[Any] = []
         for run_id, run in tuple(self._runs.items()):
@@ -567,9 +630,8 @@ class TaskLifecycle:
 
         authority = self._context.actor_resolver.resolve(actor)
         self._validate_authority(authority, normalized_event)
-        next_state = self._derive(current_status, normalized_event)
+        self._derive(current_status, normalized_event)
 
-        next_fix_round = trusted_run.fix_round
         if (current_status, normalized_event) in self._FIX_ROUND_TRANSITIONS:
             max_fix_rounds = trusted_run.contract_version.contract.max_fix_rounds
             if trusted_run.fix_round >= max_fix_rounds:
@@ -582,26 +644,27 @@ class TaskLifecycle:
                     max_fix_rounds=max_fix_rounds,
                     reason="new fix round rejected at the contract limit",
                 )
-                self._context.run_registry.record_failure(trusted_run, failure_fact)
+                self._context.run_registry.record_failure(
+                    trusted_run,
+                    failure_fact,
+                    _lifecycle_token=_LIFECYCLE_MUTATION_TOKEN,
+                )
                 raise FixRoundLimitExceeded(failure_fact)
-            next_fix_round += 1
 
         audited_event = TaskEvent._from_lifecycle(
             event_id=normalized_event_id,
-            task_id=trusted_run.task_id,
             event_name=normalized_event,
-            actor=actor.actor_id,
-            authority=authority,
-            previous_state=current_status,
+            run=trusted_run,
+            registry=self._context.run_registry,
+            actor_resolver=self._context.actor_resolver,
+            actor=actor,
             expected_previous_state=expected_status,
-            run_id=trusted_run.run_id,
-            contract_version=trusted_run.contract_version.version,
-            fix_round=next_fix_round,
         )
         self._context.run_registry.commit_transition(
             trusted_run,
-            new_state=next_state,
-            fix_round=next_fix_round,
+            new_state=audited_event.new_state,
+            fix_round=audited_event.fix_round,
+            _lifecycle_token=_LIFECYCLE_MUTATION_TOKEN,
         )
         return audited_event
 
@@ -631,6 +694,10 @@ class TaskLifecycle:
 
         if not isinstance(record, TaskRecord):
             raise TypeError("record must be a TaskRecord")
+        self._context.run_registry.require_record(record)
         updated_record = record.with_contract(contract_version)
-        self._context.run_registry.stale_active_runs(record.task_id)
+        self._context.run_registry.stale_active_runs(
+            record.task_id,
+            _lifecycle_token=_LIFECYCLE_MUTATION_TOKEN,
+        )
         return updated_record
