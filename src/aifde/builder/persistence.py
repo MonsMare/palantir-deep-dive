@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel
 
+from aifde.observability.audit import AuditEvent
 from aifde.registry.sqlite import SQLiteRegistry
 
 from .compiler import CompileResult
@@ -66,12 +67,19 @@ class BuilderRegistry(Protocol):
 
     def verify_compile_hash(self, compile_hash: str) -> bool: ...
 
+    def append_audit_event(self, event: AuditEvent) -> str: ...
+
+    def list_audit_events(self) -> list[dict[str, Any]]: ...
+
+    def verify_audit_events(self) -> bool: ...
+
 
 class SQLiteBuilderRegistry:
     """Persist immutable Builder outputs in the existing SQLite registry."""
 
     def __init__(self, database: str | Path) -> None:
         self._registry = SQLiteRegistry(database)
+        self._ensure_operational_schema()
 
     @property
     def connection(self) -> Any:
@@ -79,6 +87,96 @@ class SQLiteBuilderRegistry:
 
     def close(self) -> None:
         self._registry.close()
+
+    def append_audit_event(self, event: AuditEvent) -> str:
+        """Persist one immutable audit event with its chain hashes."""
+
+        if not isinstance(event, AuditEvent):
+            raise TypeError("event must be an AuditEvent")
+        payload = _persist_jsonable(event.model_dump(mode="python"))
+        payload_json = _canonical_json(payload)
+
+        def insert() -> None:
+            connection = self.connection
+            existing = connection.execute(
+                "SELECT sequence FROM builder_audit_events WHERE event_id = ?",
+                (event.event_id,),
+            ).fetchone()
+            if existing is not None:
+                raise ValueError("audit event is append-only and already persisted")
+            last = connection.execute(
+                "SELECT MAX(sequence) AS sequence FROM builder_audit_events"
+            ).fetchone()
+            expected_sequence = int(last["sequence"] or 0) + 1
+            if event.sequence != expected_sequence:
+                raise ValueError(
+                    f"audit sequence must append at {expected_sequence}, got {event.sequence}"
+                )
+            connection.execute(
+                """
+                INSERT INTO builder_audit_events(
+                    event_id, sequence, payload_json, payload_hash, chain_hash
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    event.event_id,
+                    event.sequence,
+                    payload_json,
+                    event.payload_hash,
+                    event.chain_hash,
+                ),
+            )
+
+        self._registry._write(insert)
+        return event.chain_hash
+
+    def list_audit_events(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT payload_json FROM builder_audit_events ORDER BY sequence"
+        ).fetchall()
+        return [json.loads(row["payload_json"]) for row in rows]
+
+    def verify_audit_events(self) -> bool:
+        events = self.list_audit_events()
+        previous_hash = "0" * 64
+        for expected_sequence, payload in enumerate(events, start=1):
+            event = AuditEvent.model_validate(payload)
+            if event.sequence != expected_sequence:
+                raise ValueError("persisted audit sequence mismatch")
+            if event.previous_hash != previous_hash:
+                raise ValueError("persisted audit predecessor hash mismatch")
+            if event.payload_hash != _payload_hash(event.payload):
+                raise ValueError("persisted audit payload hash mismatch")
+            expected_chain = _payload_hash(
+                {
+                    "sequence": event.sequence,
+                    "event_type": event.event_type,
+                    "actor": event.actor,
+                    "subject_id": event.subject_id,
+                    "payload_hash": event.payload_hash,
+                    "previous_hash": event.previous_hash,
+                }
+            )
+            if event.chain_hash != expected_chain:
+                raise ValueError("persisted audit chain hash mismatch")
+            previous_hash = event.chain_hash
+        return True
+
+    def _ensure_operational_schema(self) -> None:
+        def create() -> None:
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS builder_audit_events(
+                    event_id TEXT PRIMARY KEY,
+                    sequence INTEGER NOT NULL UNIQUE,
+                    payload_json TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    chain_hash TEXT NOT NULL
+                )
+                """
+            )
+
+        self._registry._write(create)
 
     def append_compile_result(self, result: CompileResult) -> str:
         if not isinstance(result, CompileResult):

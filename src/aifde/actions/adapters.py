@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -12,7 +12,14 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from aifde.ontology.computation import ActionOutcomeLink, GovernedActionRequest
+from aifde.ontology.computation import (
+    ActionOutcomeLink,
+    ComputationChainValidator,
+    DecisionCandidate,
+    FeatureSnapshot,
+    GovernedActionRequest,
+    PredictionArtifact,
+)
 
 from .reconciliation import ReconciliationLedger, ReconciliationRecord
 
@@ -292,6 +299,32 @@ class GovernedActionBroker:
         result = ActionExecutionResult(receipt, reconciliation, outcome_link)
         self._executions[request.action_id] = result
         return result
+
+    def execute_with_chain(
+        self,
+        snapshot: FeatureSnapshot,
+        predictions: Iterable[PredictionArtifact],
+        decision: DecisionCandidate,
+        request: GovernedActionRequest,
+        *,
+        actor: str,
+    ) -> ActionExecutionResult:
+        """Validate the complete computation chain before the adapter write."""
+
+        if not isinstance(snapshot, FeatureSnapshot):
+            raise TypeError("snapshot must be a FeatureSnapshot")
+        if not isinstance(decision, DecisionCandidate):
+            raise TypeError("decision must be a DecisionCandidate")
+        if not isinstance(request, GovernedActionRequest):
+            raise TypeError("request must be a GovernedActionRequest")
+        prediction_items = tuple(predictions)
+        ComputationChainValidator.validate(
+            snapshot,
+            *prediction_items,
+            decision,
+            request,
+        )
+        return self.execute(request, actor=actor)
 
     @staticmethod
     def _authorize(request: GovernedActionRequest, actor: str) -> None:
