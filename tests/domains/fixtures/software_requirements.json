@@ -1,0 +1,14 @@
+{
+  "requirements": [
+    {
+      "requirement_id": "REQ-001",
+      "title": "Clarify release workflow",
+      "priority": 1
+    },
+    {
+      "requirement_id": "REQ-002",
+      "title": "Track scope changes",
+      "priority": 2
+    }
+  ]
+}

@@ -6,7 +6,7 @@ from copy import deepcopy
 from threading import RLock
 from typing import Any, Iterable
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .ontology_ir import OntologyIR
 
@@ -49,10 +49,10 @@ class DomainPack(BaseModel):
     vocabulary: dict[str, str]
     ontology: OntologyIR
     mappings: tuple[dict[str, Any], ...] = ()
-    computation: dict[str, Any] = {}
-    decisions: dict[str, Any] = {}
-    actions: dict[str, Any] = {}
-    acceptance_suite: dict[str, Any] = {}
+    computation: dict[str, Any] = Field(default_factory=dict)
+    decisions: dict[str, Any] = Field(default_factory=dict)
+    actions: dict[str, Any] = Field(default_factory=dict)
+    acceptance_suite: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("pack_id", "version", "domain")
     @classmethod

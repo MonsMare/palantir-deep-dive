@@ -69,6 +69,7 @@ class OntologyReleasePackage:
     mapping_artifact_hash: str
     canonical_product_artifact_hash: str
     provenance_artifact_hash: str
+    canonical_rdf_artifact_hash: str
     gate_run_ids: tuple[str, ...]
     approval_ids: tuple[str, ...]
     dependency_versions: tuple[tuple[str, str], ...]
@@ -91,6 +92,7 @@ class BuilderGateRunner:
         proposal: CandidateProposal,
         compile_result: CompileResult,
         *,
+        compiler: Any | None = None,
         force_supplier_conflict: bool = False,
     ) -> BuilderGateReport:
         if not isinstance(proposal, CandidateProposal):
@@ -99,7 +101,7 @@ class BuilderGateRunner:
             raise TypeError("compile_result must be a CompileResult")
 
         try:
-            compiler_is_valid = MappingCompiler().validate(compile_result).passed
+            compiler_is_valid = (compiler or MappingCompiler()).validate(compile_result).passed
         except (TypeError, ValueError):
             compiler_is_valid = False
         statuses: dict[str, bool] = {
@@ -109,25 +111,40 @@ class BuilderGateRunner:
             "data.quality": self._data_is_temporally_safe(compile_result),
             "executable.readiness": self._mapping_is_executable(compile_result),
             "adversarial.challenge": True,
-            "business.exception_coverage": self._business_exception_coverage(proposal),
+            "business.exception_coverage": self._business_exception_coverage(
+                proposal, compile_result
+            ),
             "release.governance": True,
         }
         reasons: list[str] = []
-        supplier_ids = {
-            item.candidate_id for item in proposal.entities if item.entity_type == "supplier"
+        used_supplier_ids = {
+            str(row.get("supplier_resolution", {}).get("candidate_id"))
+            for row in compile_result.canonical_rows
+            if isinstance(row.get("supplier_resolution"), dict)
+            and row.get("supplier_resolution", {}).get("candidate_id")
         }
-        unresolved_suppliers = [
-            item.candidate_id
-            for item in proposal.entity_matches
-            if item.candidate_id in supplier_ids and item.status == "unresolved"
-        ]
+        matches_by_candidate = {
+            item.candidate_id: item for item in proposal.entity_matches
+        }
+        blocked_supplier_matches = []
+        if compile_result.domain_pack_id != "supplier-delay":
+            used_supplier_ids = set()
+        for candidate_id in sorted(used_supplier_ids):
+            match = matches_by_candidate.get(candidate_id)
+            if match is None:
+                blocked_supplier_matches.append(f"{candidate_id}:missing-match")
+                continue
+            if match.status == "unresolved":
+                blocked_supplier_matches.append(f"{candidate_id}:unresolved")
+            elif match.status == "probable_match" and match.conflict_refs:
+                blocked_supplier_matches.append(f"{candidate_id}:probable-match-conflict")
         if force_supplier_conflict:
-            unresolved_suppliers.append("supplier:forced-conflict")
-        if unresolved_suppliers:
+            blocked_supplier_matches.append("supplier:forced-conflict:unresolved")
+        if blocked_supplier_matches:
             statuses["adversarial.challenge"] = False
             reasons.append(
-                "entity conflict: unresolved high-impact supplier merge(s): "
-                + ", ".join(sorted(set(unresolved_suppliers)))
+                "entity conflict: non-confirmed high-impact supplier resolution(s): "
+                + ", ".join(sorted(set(blocked_supplier_matches)))
             )
 
         for gate_id, passed in statuses.items():
@@ -198,6 +215,7 @@ class BuilderGateRunner:
             mapping_artifact_hash=hashes["mappings"],
             canonical_product_artifact_hash=hashes["canonical_product"],
             provenance_artifact_hash=hashes["provenance"],
+            canonical_rdf_artifact_hash=hashes["canonical_rdf"],
             gate_run_ids=tuple(item.gate_run_id for item in gate_runs),
             approval_ids=tuple(
                 item.transition_id
@@ -224,9 +242,13 @@ class BuilderGateRunner:
             str(item.get("target_id")): item for item in result.provenance_rows
         }
         return all(
-            str(row.get("purchase_order_id")) in provenance_by_id
+            str(row.get(result.primary_key_field)) in provenance_by_id
             and set(row.get("evidence_refs", ())).issubset(known)
-            and set(provenance_by_id[str(row.get("purchase_order_id"))].get("evidence_refs", ()))
+            and set(
+                provenance_by_id[str(row.get(result.primary_key_field))].get(
+                    "evidence_refs", ()
+                )
+            )
             == set(row.get("evidence_refs", ()))
             for row in result.canonical_rows
         )
@@ -234,7 +256,7 @@ class BuilderGateRunner:
     @staticmethod
     def _data_is_temporally_safe(result: CompileResult) -> bool:
         for row in result.canonical_rows:
-            if not row.get("supplier_id") or not row.get("promised_delivery_date"):
+            if any(row.get(field) in (None, "") for field in result.required_fields):
                 return False
             if row.get("observed_at", "") > row.get("available_at", ""):
                 return False
@@ -250,7 +272,11 @@ class BuilderGateRunner:
         )
 
     @staticmethod
-    def _business_exception_coverage(proposal: CandidateProposal) -> bool:
+    def _business_exception_coverage(
+        proposal: CandidateProposal, result: CompileResult
+    ) -> bool:
+        if result.domain_pack_id != "supplier-delay":
+            return result.business_exception_coverage
         return any(
             item.assertion_type == "fact" and item.predicate == "actualDeliveryDate"
             for item in proposal.assertions
