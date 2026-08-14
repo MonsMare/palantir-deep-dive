@@ -345,6 +345,19 @@ def test_apply_derives_new_state_and_only_lifecycle_can_create_task_event():
         )
 
 
+def test_successful_apply_clears_pending_event_after_commit():
+    lifecycle, registry, resolver, _version = _context()
+
+    event = lifecycle.apply(
+        registry.get("run-1"),
+        "gates_pass",
+        **_kwargs(resolver),
+    )
+
+    assert len(registry._pending_events) == 0
+    assert registry.events == (event,)
+
+
 def test_registry_persists_derived_state_and_fix_round():
     lifecycle, registry, resolver, _version = _context(
         status=TaskStatus.FIX_REQUESTED,

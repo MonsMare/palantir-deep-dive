@@ -397,14 +397,13 @@ class TaskRunRegistry:
             raise TypeError("lifecycle commit requires a TaskEvent")
 
         with self._lock:
-            binding = self._pending_events.get(id(event))
-            if binding is None or binding[0] is not event or binding[1] is not run:
-                raise LifecycleTransitionError(
-                    "event was not issued and bound by the lifecycle factory"
-                )
-
-            committed = False
             try:
+                binding = self._pending_events.get(id(event))
+                if binding is None or binding[0] is not event or binding[1] is not run:
+                    raise LifecycleTransitionError(
+                        "event was not issued and bound by the lifecycle factory"
+                    )
+
                 self.require_registered(run)
                 if not run.is_active:
                     raise LifecycleTransitionError(
@@ -495,11 +494,9 @@ class TaskRunRegistry:
                 self._runs[run.run_id] = updated
                 self._events.append(event)
                 self._event_ids.add(event.event_id)
-                committed = True
                 return updated
             finally:
-                if not committed:
-                    self._pending_events.pop(id(event), None)
+                self._pending_events.pop(id(event), None)
 
     def _record_failure(self, run: Any, failure_fact: FailureFact) -> Any:
         with self._lock:
