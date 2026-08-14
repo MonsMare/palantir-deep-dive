@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 _LINE_LOCATOR = re.compile(r"^line:(\d+)(?:-(\d+))?$")
+_CSV_ROW_LOCATOR = re.compile(r"^csv:row:(\d+)$")
 _JSON_ARRAY_LOCATOR = re.compile(r"^\$\.([A-Za-z_][A-Za-z0-9_]*)\[(\d+)\]$")
 _MODEL_SOURCE_MARKERS = frozenset(
     {
@@ -106,6 +107,16 @@ def _replay_locator(source_content: bytes, locator: str) -> str:
         if end > len(lines):
             raise ValueError("line locator is outside source content")
         return "\n".join(lines[start - 1 : end])
+
+    csv_match = _CSV_ROW_LOCATOR.fullmatch(locator)
+    if csv_match is not None:
+        row_number = int(csv_match.group(1))
+        if row_number < 1:
+            raise ValueError("invalid CSV row locator")
+        lines = source_text.splitlines()
+        if row_number > len(lines):
+            raise ValueError("CSV row locator is outside source content")
+        return lines[row_number - 1]
 
     json_match = _JSON_ARRAY_LOCATOR.fullmatch(locator)
     if json_match is not None:
@@ -222,11 +233,19 @@ class SourceSnapshot(BaseModel):
     observed_at: datetime
     available_at: datetime
     extraction_version: str
+    source_type: str | None = None
 
     @field_validator("snapshot_id", "source_asset_id", "version", "extraction_version")
     @classmethod
     def reject_blank_identity(cls, value: str, info: Any) -> str:
         return _require_non_blank(value, info.field_name)
+
+    @field_validator("source_type")
+    @classmethod
+    def validate_optional_source_type(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_blank(value, "source_type")
 
     @field_validator("content", mode="before")
     @classmethod
@@ -284,6 +303,7 @@ class SourceSnapshot(BaseModel):
             observed_at=observed_at,
             available_at=available_at,
             extraction_version=extraction_version,
+            source_type=source_asset.source_type,
         )
 
 
@@ -420,3 +440,117 @@ class EvidenceFragment(BaseModel):
     @property
     def available_time(self) -> datetime:
         return self.available_at
+
+
+class FieldEvidenceLocation(BaseModel):
+    """The source location supporting one canonical field value."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    evidence_id: str
+    source_asset_id: str
+    source_version: str
+    snapshot_id: str
+    locator: str
+    observed_at: datetime
+    available_at: datetime
+    event_time: datetime | None = None
+
+    @field_validator(
+        "evidence_id",
+        "source_asset_id",
+        "source_version",
+        "snapshot_id",
+        "locator",
+    )
+    @classmethod
+    def reject_blank_identity(cls, value: str, info: Any) -> str:
+        return _require_non_blank(value, info.field_name)
+
+    @field_validator("observed_at", "available_at", "event_time")
+    @classmethod
+    def require_aware_datetime(cls, value: datetime | None, info: Any) -> datetime | None:
+        if value is None:
+            return None
+        return _require_aware(value, info.field_name)
+
+    @model_validator(mode="after")
+    def validate_temporal_order(self) -> FieldEvidenceLocation:
+        if self.observed_at > self.available_at:
+            raise ValueError("field evidence available_at must not precede observed_at")
+        return self
+
+
+class FieldValueProvenance(BaseModel):
+    """Field-level value, lineage, and point-in-time visibility contract.
+
+    Row-level timestamps are insufficient for predictive systems: a late
+    delivery fact can arrive after the purchase-order snapshot.  This contract
+    makes the value's own ``available_at`` the authoritative as-of boundary.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
+
+    field_name: str
+    value: Any
+    evidence_refs: tuple[str, ...]
+    mapping_ids: tuple[str, ...] = ()
+    source_locations: tuple[FieldEvidenceLocation, ...]
+    event_time: datetime | None = None
+    observed_at: datetime
+    available_at: datetime
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
+
+    @field_validator("field_name")
+    @classmethod
+    def reject_blank_field_name(cls, value: str) -> str:
+        return _require_non_blank(value, "field_name")
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def freeze_value(cls, value: Any) -> Any:
+        return _immutable_json(value)
+
+    @field_validator("evidence_refs", "mapping_ids")
+    @classmethod
+    def normalize_refs(cls, value: tuple[str, ...], info: Any) -> tuple[str, ...]:
+        if any(not isinstance(item, str) or not item.strip() for item in value):
+            raise ValueError(f"{info.field_name} must contain non-empty identities")
+        if info.field_name == "evidence_refs" and not value:
+            raise ValueError("evidence_refs must not be empty")
+        return tuple(dict.fromkeys(item.strip() for item in value))
+
+    @field_validator("observed_at", "available_at", "event_time", "valid_from", "valid_to")
+    @classmethod
+    def require_aware_datetime(cls, value: datetime | None, info: Any) -> datetime | None:
+        if value is None:
+            return None
+        return _require_aware(value, info.field_name)
+
+    @model_validator(mode="after")
+    def validate_temporal_contract(self) -> FieldValueProvenance:
+        if not self.source_locations:
+            raise ValueError("field provenance requires source_locations")
+        if self.observed_at > self.available_at:
+            raise ValueError("field provenance available_at must not precede observed_at")
+        if any(item.observed_at > item.available_at for item in self.source_locations):
+            raise ValueError("field provenance contains invalid source temporal order")
+        if self.valid_from is not None and self.valid_to is not None and self.valid_from > self.valid_to:
+            raise ValueError("field provenance valid_to must not precede valid_from")
+        return self
+
+    def available_by(self, as_of_time: datetime) -> bool:
+        """Return whether this value was available at a requested as-of time."""
+
+        as_of_time = _require_aware(as_of_time, "as_of_time")
+        return self.available_at <= as_of_time
+
+
+__all__ = [
+    "EvidenceFragment",
+    "FieldEvidenceLocation",
+    "FieldValueProvenance",
+    "SourceAsset",
+    "SourceSnapshot",
+]
