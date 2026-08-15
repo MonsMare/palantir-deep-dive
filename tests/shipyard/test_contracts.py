@@ -235,6 +235,21 @@ def test_gate_review_and_release_candidate_require_traceable_references() -> Non
         )
 
 
+def test_release_candidate_rejects_ambiguous_manifest_hash_fields() -> None:
+    with pytest.raises(ValidationError, match="exactly one reserved hash field"):
+        ReleaseCandidate(
+            candidate_id="candidate-1",
+            workspace_id="ws-1",
+            artifact_ids=["artifact-1"],
+            gate_run_ids=["gate-run-1"],
+            manifest={
+                "artifact_hashes": {"artifact-1": "a" * 64},
+                "content_hash": "not-a-sha256",
+            },
+            created_by="alice",
+        )
+
+
 def test_audit_event_builds_and_rejects_tampered_hashes() -> None:
     event = AuditEvent.build(
         workspace_id="ws-1",

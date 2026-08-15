@@ -301,21 +301,34 @@ class ReleaseCandidate(_FrozenContract):
             raise ValueError("manifest must be a non-empty mapping")
 
         normalized = dict(value)
-        if "artifact_hashes" in normalized:
+        reserved_hash_fields = (
+            "artifact_hashes",
+            "content_hash",
+            "manifest_hash",
+        )
+        present_hash_fields = [
+            field_name for field_name in reserved_hash_fields if field_name in normalized
+        ]
+        if not present_hash_fields:
+            raise ValueError(
+                "manifest must include artifact_hashes, content_hash, or manifest_hash"
+            )
+        if len(present_hash_fields) > 1:
+            raise ValueError(
+                "manifest must contain exactly one reserved hash field"
+            )
+
+        if present_hash_fields[0] == "artifact_hashes":
             normalized["artifact_hashes"] = _hash_map(
                 normalized["artifact_hashes"], "manifest.artifact_hashes"
             )
-        elif "content_hash" in normalized:
+        elif present_hash_fields[0] == "content_hash":
             normalized["content_hash"] = _sha256(
                 normalized["content_hash"], "manifest.content_hash"
             )
-        elif "manifest_hash" in normalized:
+        else:
             normalized["manifest_hash"] = _sha256(
                 normalized["manifest_hash"], "manifest.manifest_hash"
-            )
-        else:
-            raise ValueError(
-                "manifest must include artifact_hashes, content_hash, or manifest_hash"
             )
         return normalized
 
