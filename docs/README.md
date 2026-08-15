@@ -11,6 +11,27 @@
 5. [软件研发需求对齐与工期预测样板](superpowers/specs/2026-08-11-software-requirements-alignment-delivery-forecasting-design.md)：第一条用于体验完整 Shipyard 流程的垂直领域。
 6. [Shipyard 内核验收说明](production-ai-fde-acceptance.md)：当前实现能证明什么、不能宣称什么、下一步怎样交付 Workbench。
 
+## Phase 0 可运行垂直切片
+
+当前实现已包含软件交付领域的第一条 Workbench review/release-eligibility 链路：
+
+```text
+本地项目资产
+  → Shipyard seed Workspace / Decision Case / typed Artifact
+  → sandbox Gate snapshot
+  → system gate-runner 经 Application Service 记录 Gate Review
+  → 人类审阅 Agent Proposal 与 Gate evidence
+  → required gates 全部通过后生成 Release Candidate manifest
+```
+
+可用命令：
+
+```powershell
+python scripts/shipyard_seed.py --database .tmp/shipyard.db --owner alice
+```
+
+这条命令只初始化本地 SQLite；它不是客户生产 runtime、完整 ML 评测实验室、生产 connector、Docker 部署或 Linear 适配器。若当前 Python 环境缺少 demo pipeline 的可选评测依赖，初始化仍会生成可审计的 blocked Gate Review，而不会错误放行候选发布。
+
 ## 研究资料
 
 [Palantir Foundry / Ontology / AIP 工程方法 Wiki](../wiki/README.md) 保留官方文档研究、方法论、工程公式和数据产品研究，作为 Shipyard 的方法来源，不作为当前软件实现规格。
