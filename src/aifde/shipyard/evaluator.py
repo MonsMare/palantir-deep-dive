@@ -175,6 +175,9 @@ def evaluate_registered_artifacts(
         digest = sha256(canonical_json_bytes(digest_payload)).hexdigest()
         artifact_digests[artifact_id] = digest
         evidence_refs.add(f"artifact-evaluator:{artifact_id}:{digest}")
+        evidence_refs.add(
+            f"artifact-evaluator-result:{artifact_id}:{semantic_status}"
+        )
 
     return ArtifactEvaluation(
         input_snapshot=input_snapshot,
@@ -324,6 +327,10 @@ def _validate_artifact_semantics(
     if spec is None:
         return ["Artifact ID is not in the fixed software-delivery mapping"], None, ""
     violations: list[str] = []
+    if artifact.kind != spec.kind:
+        violations.append(
+            f"expected Artifact kind {spec.kind}, got {artifact.kind}"
+        )
     content = artifact.content
     if not isinstance(content, Mapping):
         return ["content must be a document envelope"], None, ""
@@ -454,6 +461,16 @@ def _semantic_document_violations(key: str, document: Any) -> list[str]:
 def _parse_document(raw_bytes: bytes, format_name: str) -> Any:
     text = raw_bytes.decode("utf-8")
     if format_name == "turtle":
+        try:
+            from rdflib import Graph
+        except ModuleNotFoundError as exc:
+            raise ValueError(
+                "required Turtle evaluator dependency rdflib is unavailable"
+            ) from exc
+        try:
+            Graph().parse(data=text, format="turtle")
+        except Exception as exc:
+            raise ValueError(f"invalid Turtle document: {exc}") from exc
         return text
     if format_name == "yaml":
         document = yaml.safe_load(text)
