@@ -101,3 +101,65 @@ npm run build
 
 - 运行环境需要配置 `VITE_SHIPYARD_API_URL` 与 `VITE_SHIPYARD_IDENTITY`；未配置身份时 API 会按 Task 4 合同返回认证错误，UI 会显示失败状态，这是有意保留的认证边界。
 - Task 4 当前没有独立的客户生产 release endpoint；本任务只调用已提供的 Release Candidate API，未新增后端、未执行生产 Action。除此之外无阻塞项。
+
+## Fix round 1：处理 reviewer 的 I-1 / I-2 / I-3
+
+本轮只修改 reviewer 标记的三个 Important；M-1（成功空/非 JSON body）与 M-2（API client/header/invalidation 直接单测）按要求延后，未在本轮实现。
+
+### 根因与修复
+
+- I-1：新增 `VITE_SHIPYARD_REQUIRED_GATES` 解析；未配置时对 `software_delivery` 使用 `semantic.integrity` 与 `release.governance` 默认 required gate 集合。`evaluateReleaseReadiness(...)` 按每个 `gate_id` 的 `(revision, created_at, snapshot 顺序)` 选择 current/latest review，校验 required gate 是否齐全、Artifact 是否非空、current review 是否 `passed` 且非 `stale`，以及每个 Gate Review 的 `artifact_hashes` 是否与当前 Artifact 集合完全相等。GatePanel 只显示 current review；Release Candidate 请求只提交 `currentArtifactIds` 与 required current `currentGateRunIds`。
+- I-2：Gate Review 新增 revision、created_at、自身 content hash 和 gate run ID 展示；Release Candidate 新增 status、created_by、created_at、content hash、artifact/gate 引用、manifest artifact hashes、manifest gate run IDs 和 manifest digest。`HashValue` 现在把完整 hash 放在可访问 DOM 文本和 `aria-label` 中，不再只把完整值藏在 title。
+- I-3：blocked 测试断言按钮 `toBeDisabled()` 且点击不会调用 release API；passed fixture 同时包含两个真实 required gates、非空 Artifact 和匹配 hash，并用 `vi.fn`/点击断言 authenticated release API 只在点击时调用，参数只包含当前 Artifact 与两个 current required gate runs。新增 failed、blocked、pending、stale、missing required gate、empty Artifact、hash mismatch 和 older-passed/latest-current review 测试；既有无 Agent approve/production Action 断言保持不变。
+
+### Fix round 1 RED
+
+先补充 fixture 和测试，再运行：
+
+```powershell
+npm test -- --run
+```
+
+结果：`13 tests | 4 failed`。失败准确暴露四个 readiness 缺口：missing required gate 没有显示阻断、空 Artifact 仍启用按钮、Artifact hash mismatch 仍启用按钮、旧 passed review 未被 current/latest review 选择逻辑替代。
+
+### Fix round 1 GREEN
+
+实现 readiness policy、current review 选择、证据展示和受限 release payload 后运行同一命令：
+
+```text
+Test Files  1 passed (1)
+Tests       13 passed (13)
+```
+
+### Fix round 1 Build
+
+```powershell
+npm run build
+```
+
+结果：`tsc --noEmit` 与 Vite production build 均 exit `0`；重新生成 `workbench/dist/index.html`、CSS 和 JS bundle。
+
+### Fix round 1 修改文件
+
+- `workbench/src/App.tsx`
+- `workbench/src/App.test.tsx`
+- `workbench/src/styles.css`
+- 本报告追加本节
+
+未修改 Python、Task 4 API、package 依赖或 Docker；M-1/M-2 未处理。
+
+### Fix round 1 自审
+
+- Readiness 不再把 snapshot 中任意一条 passed gate 当作 release-ready；缺少 required gate、非 current review、failed/blocked/pending、stale、空 Artifact、hash key/value 不精确匹配都会阻断。
+- Release button blocked 时原生 disabled，点击不会触发 API；passed 时通过注入的 authenticated API client 调用，payload 只使用 current Artifact IDs 与 required current Gate Review run IDs。
+- Gate/Release evidence 的完整 hash 在 DOM 文本中可访问；manifest 的 artifact hash、gate run IDs 与 digest 分项可审阅。
+- 最终仍无 Agent approve/批准/审批/同意控件和客户 production Action 控件；`git diff --cached --check` 通过，fix diff 没有 `.py` 文件。
+
+### Fix round 1 提交 SHA
+
+实现提交：`39e719df299f6c2ecb538f3744538a15dca5c5c3`（`fix: harden Shipyard Workbench release readiness`）。
+
+### Fix round 1 concerns
+
+- required gate 默认策略仅对 `domain_pack === "software_delivery"` 生效；其他 domain pack 需要通过 `VITE_SHIPYARD_REQUIRED_GATES` 显式配置，否则 UI 保守地保持 blocked。
+- M-1/M-2 仍按 reviewer 指定延后；本轮没有扩大到成功空 body/API client 直接单测范围。
