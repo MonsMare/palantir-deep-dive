@@ -50,6 +50,24 @@ def _sha256(value: str, field_name: str) -> str:
     return value
 
 
+def _hash_map(value: Any, field_name: str) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{field_name} must be a mapping")
+    if not value:
+        raise ValueError(f"{field_name} must not be empty")
+    normalized: dict[str, str] = {}
+    for record_id, record_hash in value.items():
+        normalized[_nonblank(record_id, "record_id")] = _sha256(
+            record_hash, f"{field_name} hash"
+        )
+    return normalized
+
+
+def _content_hash_for_model(model: BaseModel) -> str:
+    payload = model.model_dump(mode="json", exclude={"content_hash"})
+    return sha256(canonical_json_bytes(payload)).hexdigest()
+
+
 class _FrozenContract(BaseModel):
     """Shared strict configuration and validated copy semantics."""
 
@@ -58,7 +76,7 @@ class _FrozenContract(BaseModel):
     def model_copy(
         self, *, update: Mapping[str, Any] | None = None, deep: bool = False
     ) -> Self:
-        values = self.model_dump(mode="python")
+        values = self.model_dump(mode="python", exclude={"content_hash"})
         if deep:
             values = deepcopy(values)
         if update:
@@ -168,6 +186,7 @@ class AgentProposal(_FrozenContract):
     base_revision: int = Field(default=1, ge=1)
     status: Literal["proposed", "accepted", "rejected", "returned", "stale"] = "proposed"
     created_at: datetime = Field(default_factory=_utc_now)
+    content_hash: str = ""
 
     @field_validator("proposal_id", "workspace_id", "task_packet_id", "producer")
     @classmethod
@@ -195,11 +214,20 @@ class AgentProposal(_FrozenContract):
     def normalize_created_at(cls, value: datetime) -> datetime:
         return _aware_utc(value, "created_at")
 
+    @model_validator(mode="after")
+    def verify_content_hash(self) -> AgentProposal:
+        expected = _content_hash_for_model(self)
+        if self.content_hash not in ("", expected):
+            raise ValueError("content_hash does not match canonical proposal content")
+        object.__setattr__(self, "content_hash", expected)
+        return self
+
 
 class GateReviewSnapshot(_FrozenContract):
     """An immutable snapshot of one gate run against exact Artifact hashes."""
 
     gate_run_id: str
+    revision: int = Field(default=1, ge=1)
     workspace_id: str
     gate_id: str
     severity: Literal["hard", "soft"]
@@ -211,6 +239,7 @@ class GateReviewSnapshot(_FrozenContract):
     evidence_refs: list[str] = Field(default_factory=list)
     stale: bool = False
     created_at: datetime = Field(default_factory=_utc_now)
+    content_hash: str = ""
 
     @field_validator("gate_run_id", "workspace_id", "gate_id", "validator_version")
     @classmethod
@@ -220,14 +249,7 @@ class GateReviewSnapshot(_FrozenContract):
     @field_validator("artifact_hashes", mode="before")
     @classmethod
     def normalize_artifact_hashes(cls, value: Any) -> dict[str, str]:
-        if not isinstance(value, Mapping):
-            raise TypeError("artifact_hashes must be a mapping")
-        normalized: dict[str, str] = {}
-        for artifact_id, artifact_hash in value.items():
-            normalized[_nonblank(artifact_id, "artifact_id")] = _sha256(
-                artifact_hash, "artifact_hash"
-            )
-        return normalized
+        return _hash_map(value, "artifact_hashes")
 
     @field_validator("violations", "warnings", "evidence_refs", mode="before")
     @classmethod
@@ -239,18 +261,28 @@ class GateReviewSnapshot(_FrozenContract):
     def normalize_created_at(cls, value: datetime) -> datetime:
         return _aware_utc(value, "created_at")
 
+    @model_validator(mode="after")
+    def verify_content_hash(self) -> GateReviewSnapshot:
+        expected = _content_hash_for_model(self)
+        if self.content_hash not in ("", expected):
+            raise ValueError("content_hash does not match canonical gate review content")
+        object.__setattr__(self, "content_hash", expected)
+        return self
+
 
 class ReleaseCandidate(_FrozenContract):
     """A release manifest candidate awaiting application-level authorization."""
 
     candidate_id: str
+    revision: int = Field(default=1, ge=1)
     workspace_id: str
     artifact_ids: list[str] = Field(default_factory=list)
     gate_run_ids: list[str] = Field(default_factory=list)
-    manifest: dict[str, JsonValue] = Field(default_factory=dict)
+    manifest: dict[str, JsonValue]
     status: Literal["draft", "ready", "blocked", "released"] = "draft"
     created_at: datetime = Field(default_factory=_utc_now)
     created_by: str
+    content_hash: str = ""
 
     @field_validator("candidate_id", "workspace_id", "created_by")
     @classmethod
@@ -262,27 +294,64 @@ class ReleaseCandidate(_FrozenContract):
     def normalize_candidate_ids(cls, value: Any, info: Any) -> list[str]:
         return _nonblank_list(value, info.field_name)
 
+    @field_validator("manifest", mode="before")
+    @classmethod
+    def validate_manifest(cls, value: Any) -> dict[str, JsonValue]:
+        if not isinstance(value, Mapping) or not value:
+            raise ValueError("manifest must be a non-empty mapping")
+
+        normalized = dict(value)
+        if "artifact_hashes" in normalized:
+            normalized["artifact_hashes"] = _hash_map(
+                normalized["artifact_hashes"], "manifest.artifact_hashes"
+            )
+        elif "content_hash" in normalized:
+            normalized["content_hash"] = _sha256(
+                normalized["content_hash"], "manifest.content_hash"
+            )
+        elif "manifest_hash" in normalized:
+            normalized["manifest_hash"] = _sha256(
+                normalized["manifest_hash"], "manifest.manifest_hash"
+            )
+        else:
+            raise ValueError(
+                "manifest must include artifact_hashes, content_hash, or manifest_hash"
+            )
+        return normalized
+
     @field_validator("created_at")
     @classmethod
     def normalize_created_at(cls, value: datetime) -> datetime:
         return _aware_utc(value, "created_at")
 
+    @model_validator(mode="after")
+    def verify_content_hash(self) -> ReleaseCandidate:
+        expected = _content_hash_for_model(self)
+        if self.content_hash not in ("", expected):
+            raise ValueError("content_hash does not match canonical release candidate content")
+        object.__setattr__(self, "content_hash", expected)
+        return self
+
 
 def _event_hash_for(
     *,
+    event_id: str,
     workspace_id: str,
     event_type: str,
     actor: str,
     actor_kind: str,
     payload: JsonValue,
+    created_at: datetime,
     predecessor_hash: str,
 ) -> str:
     event_payload = {
+        "event_id": event_id,
         "workspace_id": workspace_id,
         "event_type": event_type,
         "actor": actor,
         "actor_kind": actor_kind,
         "payload": payload,
+        "created_at": created_at.isoformat(),
         "predecessor_hash": predecessor_hash,
     }
     return sha256(canonical_json_bytes(event_payload)).hexdigest()
@@ -319,11 +388,13 @@ class AuditEvent(_FrozenContract):
     @model_validator(mode="after")
     def verify_event_hash(self) -> AuditEvent:
         expected = _event_hash_for(
+            event_id=self.event_id,
             workspace_id=self.workspace_id,
             event_type=self.event_type,
             actor=self.actor,
             actor_kind=self.actor_kind,
             payload=self.payload,
+            created_at=self.created_at,
             predecessor_hash=self.predecessor_hash,
         )
         if self.event_hash != expected:
@@ -341,19 +412,23 @@ class AuditEvent(_FrozenContract):
         predecessor_hash: str,
     ) -> AuditEvent:
         timestamp = _utc_now()
+        event_id = f"audit:{uuid4()}"
         normalized_workspace_id = _nonblank(workspace_id, "workspace_id")
         normalized_event_type = _nonblank(event_type, "event_type")
         normalized_actor = _nonblank(actor, "actor")
         normalized_predecessor_hash = _sha256(predecessor_hash, "predecessor_hash")
         event_hash = _event_hash_for(
+            event_id=event_id,
             workspace_id=normalized_workspace_id,
             event_type=normalized_event_type,
             actor=normalized_actor,
             actor_kind=actor_kind,
             payload=payload,
+            created_at=timestamp,
             predecessor_hash=normalized_predecessor_hash,
         )
         return cls(
+            event_id=event_id,
             workspace_id=normalized_workspace_id,
             event_type=normalized_event_type,
             actor=normalized_actor,

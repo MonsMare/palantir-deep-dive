@@ -159,6 +159,7 @@ def test_record_timestamps_are_aware_and_normalized_to_utc() -> None:
 def test_gate_review_and_release_candidate_require_traceable_references() -> None:
     gate = GateReviewSnapshot(
         gate_run_id="gate-run-1",
+        revision=2,
         workspace_id="ws-1",
         gate_id="semantic.integrity",
         severity="hard",
@@ -173,6 +174,7 @@ def test_gate_review_and_release_candidate_require_traceable_references() -> Non
     )
     candidate = ReleaseCandidate(
         candidate_id="candidate-1",
+        revision=2,
         workspace_id="ws-1",
         artifact_ids=["artifact-1"],
         gate_run_ids=[gate.gate_run_id],
@@ -183,12 +185,46 @@ def test_gate_review_and_release_candidate_require_traceable_references() -> Non
     )
 
     assert gate.status == "passed"
+    assert gate.revision == 2
+    assert len(gate.content_hash) == 64
     assert candidate.status == "ready"
+    assert candidate.revision == 2
+    assert len(candidate.content_hash) == 64
+
+    with pytest.raises(ValidationError):
+        ReleaseCandidate.model_validate(candidate.model_dump() | {"content_hash": "f" * 64})
+
+    with pytest.raises(ValidationError):
+        ReleaseCandidate.model_validate(
+            {
+                "candidate_id": "candidate-1",
+                "revision": 1,
+                "workspace_id": "ws-1",
+                "artifact_ids": ["artifact-1"],
+                "gate_run_ids": [gate.gate_run_id],
+                "manifest": {},
+                "created_by": "alice",
+            }
+        )
+
+    with pytest.raises(ValidationError):
+        ReleaseCandidate.model_validate(
+            {
+                "candidate_id": "candidate-1",
+                "revision": 1,
+                "workspace_id": "ws-1",
+                "artifact_ids": ["artifact-1"],
+                "gate_run_ids": [gate.gate_run_id],
+                "manifest": {"artifact_hashes": {"artifact-1": "forged"}},
+                "created_by": "alice",
+            }
+        )
 
     with pytest.raises(ValidationError):
         GateReviewSnapshot.model_validate(
             {
                 "gate_run_id": "gate-run-1",
+                "revision": 1,
                 "workspace_id": "ws-1",
                 "gate_id": "semantic.integrity",
                 "severity": "hard",
@@ -220,6 +256,16 @@ def test_audit_event_builds_and_rejects_tampered_hashes() -> None:
         AuditEvent.model_validate(
             event.model_dump(mode="python")
             | {"payload": {"revision": 2, "name": "tampered"}}
+        )
+
+    with pytest.raises(ValidationError):
+        AuditEvent.model_validate(
+            event.model_dump(mode="python") | {"event_id": "audit:other"}
+        )
+    with pytest.raises(ValidationError):
+        AuditEvent.model_validate(
+            event.model_dump(mode="python")
+            | {"created_at": UTC_TIMESTAMP.replace(hour=9)}
         )
 
 

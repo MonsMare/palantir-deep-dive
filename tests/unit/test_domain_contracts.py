@@ -98,7 +98,9 @@ def test_artifact_new_metadata_is_backward_compatible_and_hash_is_stable():
     assert artifact.parent_artifact_ids == []
     assert artifact.content_hash == content_hash_for(artifact.content)
     assert artifact.validation_results == []
-    assert artifact.created_at is None
+    assert artifact.created_at is not None
+    assert artifact.created_at.tzinfo is not None
+    assert artifact.created_at.utcoffset() == timezone.utc.utcoffset(artifact.created_at)
 
     timestamped = Artifact.build(
         project_id="p1",
@@ -122,6 +124,23 @@ def test_artifact_new_metadata_is_backward_compatible_and_hash_is_stable():
     assert copied.producer == "agent-1"
     assert copied.validation_results == [{"status": "passed"}]
     assert copied.content_hash == content_hash_for(copied.content)
+
+
+def test_legacy_artifact_without_created_at_gets_a_utc_compatibility_timestamp():
+    artifact = Artifact.build(
+        artifact_id="artifact-1",
+        project_id="p1",
+        kind="DecisionContract",
+        content={"objective": "forecast"},
+        owner="alice",
+    )
+    legacy_payload = artifact.model_dump(exclude={"created_at"})
+
+    restored_legacy = Artifact.model_validate(legacy_payload)
+
+    assert restored_legacy.created_at is not None
+    assert restored_legacy.created_at.tzinfo is not None
+    assert artifact == restored_legacy
 
 
 def test_artifact_hash_changes_when_content_changes_and_survives_round_trip():
