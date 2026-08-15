@@ -159,3 +159,75 @@ pytest tests/unit/test_sqlite_registry.py tests/gates/test_bypass_paths.py tests
 
 - SQLite schema/repository 仍按 Task 2 边界未修改；本轮只保证旧 SQLite 读入不产生 `None` 且既有 Artifact 回归保持通过。新 hash/revision 字段的持久化列和追加式 Registry 行为仍由 Task 2 实现。
 - 本轮无阻塞项。
+
+## Fix round 2：manifest 多 hash 组合校验
+
+### 改动
+
+- `ReleaseCandidate.validate_manifest` 现在先枚举 `artifact_hashes`、`content_hash`、`manifest_hash` 三个保留 hash 字段；缺少全部保留字段仍拒绝，同时出现多个保留字段时明确拒绝，避免 `if/elif` 只校验第一个字段。
+- 单一保留字段的既有行为保持不变：`artifact_hashes` 逐项校验 SHA-256，`content_hash` 和 `manifest_hash` 校验 SHA-256；多字段组合统一抛出 `manifest must contain exactly one reserved hash field`。
+- 新增组合回归测试，覆盖合法 `artifact_hashes` 与非法 `content_hash` 同时出现的探针场景，并断言该歧义组合被明确拒绝。
+
+### Fix round 2 TDD 红灯命令/输出
+
+命令：
+
+```powershell
+pytest tests/shipyard/test_contracts.py tests/unit/test_domain_contracts.py -q
+```
+
+结果：退出码 `1`；新增测试按预期暴露旧实现的短路缺口：
+
+```text
+......F......................................                            [100%]
+1 failed, 44 passed in 0.49s
+```
+
+失败为 `test_release_candidate_rejects_ambiguous_manifest_hash_fields` 的 `DID NOT RAISE ValidationError`。
+
+### Fix round 2 绿灯命令/输出
+
+命令：
+
+```powershell
+pytest tests/shipyard/test_contracts.py tests/unit/test_domain_contracts.py -q
+```
+
+结果：
+
+```text
+.............................................                            [100%]
+45 passed in 0.37s
+```
+
+### Fix round 2 回归命令/输出
+
+命令：
+
+```powershell
+pytest tests/unit/test_sqlite_registry.py tests/gates/test_bypass_paths.py tests/api/test_sqlite_registry_routes.py -q
+```
+
+结果：
+
+```text
+...........                                                              [100%]
+11 passed in 2.92s
+```
+
+辅助验证：`python -m py_compile src/aifde/shipyard/contracts.py tests/shipyard/test_contracts.py` 退出码 `0`；`git diff --check` 退出码 `0`；暂存区仅包含 `src/aifde/shipyard/contracts.py` 与 `tests/shipyard/test_contracts.py`。
+
+### Fix round 2 自审
+
+- 三个保留 hash 字段在分派到具体 SHA-256 校验前统一计数；组合场景不会再因 `if/elif` 顺序而绕过后续字段，且拒绝消息明确表达“恰好一个”。
+- 单一 `artifact_hashes`、`content_hash`、`manifest_hash` 路径仍分别经过原有结构/格式校验；manifest 非空和未知字段约束未放宽。
+- 既有 Artifact 非空 UTC 时间、身份/时间校验、内容哈希、Gate/Audit hash、`model_copy` 兼容测试均包含在 45 个聚焦测试中；Task 1 回归 11 个测试全部通过。
+- 本轮只修改 Task 1 范围内的合同与测试文件，未实现 Task 2 Registry/Service，也未触碰 SQLite schema/repository。
+
+### Fix round 2 提交 SHA
+
+`a2833d1`（`fix: reject ambiguous manifest hash combinations`）。
+
+### Fix round 2 遗留疑问
+
+- 无本轮阻塞项；SQLite 新字段持久化和追加式 Registry 行为仍按既定范围留给 Task 2。
