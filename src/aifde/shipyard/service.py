@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
+from hashlib import sha256
 from typing import Any, Literal
 from uuid import uuid4
 
-from aifde.domain.artifacts import Artifact
+from aifde.domain.artifacts import Artifact, canonical_json_bytes
 from aifde.registry.sqlite import SQLiteRegistry
 from aifde.shipyard.contracts import (
     AgentProposal,
@@ -18,7 +19,6 @@ from aifde.shipyard.contracts import (
     ReleaseCandidate,
 )
 from aifde.shipyard.identity import (
-    FakeIdentityProvider,
     IdentityProvider,
     Principal,
     UnauthorizedError,
@@ -74,11 +74,8 @@ class ShipyardApplicationService:
         identity_provider: IdentityProvider | None = None,
         required_gate_ids: frozenset[str] | None = None,
     ) -> None:
-        if required_gate_ids is None and isinstance(
-            identity_provider, (set, frozenset)
-        ):
-            required_gate_ids = frozenset(identity_provider)
-            identity_provider = None
+        if identity_provider is None:
+            raise ValueError("identity_provider must be supplied explicitly")
         if required_gate_ids is None:
             raise ValueError("required_gate_ids must be supplied explicitly")
         normalized_gate_ids = frozenset(required_gate_ids)
@@ -89,21 +86,24 @@ class ShipyardApplicationService:
             raise ValueError("required_gate_ids must contain non-blank gate IDs")
         if not hasattr(registry, "transaction"):
             raise TypeError("registry must provide transaction()")
+        if not callable(getattr(identity_provider, "verify", None)):
+            raise TypeError("identity_provider must implement verify(principal)")
         self.registry = registry
-        self.identity_provider = identity_provider or FakeIdentityProvider()
+        self.identity_provider = identity_provider
         self.required_gate_ids = normalized_gate_ids
 
-    @staticmethod
-    def _principal(principal: Principal) -> Principal:
+    def _principal(self, principal: Principal) -> Principal:
         if not isinstance(principal, Principal):
             raise UnauthorizedError("operation requires a trusted Principal")
-        return principal
+        canonical = self.identity_provider.verify(principal)
+        if not isinstance(canonical, Principal):
+            raise UnauthorizedError("identity provider returned an invalid Principal")
+        return canonical
 
-    @classmethod
     def _require_kind(
-        cls, principal: Principal, *allowed_kinds: Literal["human", "agent", "system"]
+        self, principal: Principal, *allowed_kinds: Literal["human", "agent", "system"]
     ) -> Principal:
-        principal = cls._principal(principal)
+        principal = self._principal(principal)
         if principal.kind not in allowed_kinds:
             allowed = ", ".join(allowed_kinds)
             raise UnauthorizedError(
@@ -569,12 +569,18 @@ class ShipyardApplicationService:
 
             ordered_artifact_ids = sorted(requested_artifact_ids)
             ordered_gate_run_ids = sorted(requested_gate_run_ids)
-            manifest = {
+            manifest_payload = {
                 "artifact_hashes": {
                     artifact_id: artifacts[artifact_id].content_hash
                     for artifact_id in ordered_artifact_ids
                 },
                 "gate_run_ids": ordered_gate_run_ids,
+            }
+            manifest = {
+                **manifest_payload,
+                "manifest_digest": sha256(
+                    canonical_json_bytes(manifest_payload)
+                ).hexdigest(),
             }
             candidate = ReleaseCandidate(
                 candidate_id=f"candidate:{uuid4()}",

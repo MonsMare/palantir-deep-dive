@@ -50,6 +50,9 @@ class IdentityProvider(Protocol):
     def resolve(self, request_context: Mapping[str, str]) -> Principal:
         """Return the preconfigured identity represented by the request context."""
 
+    def verify(self, principal: Principal) -> Principal:
+        """Return the canonical bound Principal or reject the supplied claim."""
+
 
 class FakeIdentityProvider:
     """Explicit in-memory identity directory for local and test use only."""
@@ -93,6 +96,20 @@ class FakeIdentityProvider:
         if principal is None:
             raise UnauthorizedError(f"unknown identity: {subject.strip()}")
         return principal
+
+    def verify(self, principal: Principal) -> Principal:
+        """Verify an application caller against an exact explicit binding."""
+
+        if not isinstance(principal, Principal):
+            raise UnauthorizedError("operation requires a Principal")
+        bound = self._bindings.get(principal.subject)
+        if bound is None:
+            raise UnauthorizedError(f"unknown identity: {principal.subject}")
+        if bound != principal:
+            raise UnauthorizedError(
+                f"identity claim does not match the binding for {principal.subject}"
+            )
+        return bound
 
 
 __all__ = [

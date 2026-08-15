@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from hashlib import sha256
 from typing import Any
 
 import pytest
 
-from aifde.domain.artifacts import Artifact
+from aifde.domain.artifacts import Artifact, canonical_json_bytes
 from aifde.registry.sqlite import SQLiteRegistry
 from aifde.shipyard.contracts import GateReviewSnapshot
 from aifde.shipyard.identity import (
@@ -111,6 +112,7 @@ def service(tmp_path):
     registry = SQLiteRegistry(tmp_path / "shipyard.db")
     identity = FakeIdentityProvider()
     identity.bind("alice", "human", {"workspace-owner", "release-owner"})
+    identity.bind("bob", "human", {"workspace-owner", "release-owner"})
     identity.bind("agent-1", "agent", {"builder"})
     identity.bind("gate-runner", "system", {"gate-runner"})
     application = ShipyardApplicationService(
@@ -139,6 +141,40 @@ def test_fake_identity_requires_explicit_binding_and_ignores_claimed_kind() -> N
         provider.resolve({"subject": "agent-1-prefix-attacker"})
     with pytest.raises(UnauthorizedError):
         provider.resolve({"actor": "agent-1"})
+
+
+def test_service_requires_an_explicit_identity_provider(tmp_path) -> None:
+    registry = SQLiteRegistry(tmp_path / "shipyard.db")
+    try:
+        with pytest.raises(ValueError, match="identity_provider"):
+            ShipyardApplicationService(
+                registry,
+                required_gate_ids=REQUIRED_GATES,
+            )
+    finally:
+        registry.close()
+
+
+def test_service_rejects_unbound_or_mismatched_principals(service) -> None:
+    with pytest.raises(UnauthorizedError, match="identity"):
+        service.create_workspace(
+            workspace_input("unbound"),
+            Principal(
+                subject="unbound",
+                kind="human",
+                roles=frozenset({"workspace-owner"}),
+            ),
+        )
+
+    with pytest.raises(UnauthorizedError, match="identity"):
+        service.create_workspace(
+            workspace_input("mismatched"),
+            Principal(
+                subject="alice",
+                kind="human",
+                roles=frozenset({"forged-role"}),
+            ),
+        )
 
 
 @pytest.mark.parametrize(
@@ -418,6 +454,22 @@ def test_release_candidate_is_ready_with_deterministic_manifest(service) -> None
         "artifact-b": next(item for item in artifacts if item.artifact_id == "artifact-b").content_hash,
     }
     assert candidate.manifest["gate_run_ids"] == candidate.gate_run_ids
+
+    repeated = service.create_release_candidate(
+        workspace.workspace_id,
+        [artifact.artifact_id for artifact in artifacts],
+        [review.gate_run_id for review in reviews],
+        human_principal(),
+    )
+    digest_payload = {
+        "artifact_hashes": candidate.manifest["artifact_hashes"],
+        "gate_run_ids": candidate.gate_run_ids,
+    }
+    expected_digest = sha256(canonical_json_bytes(digest_payload)).hexdigest()
+    assert candidate.candidate_id != repeated.candidate_id
+    assert candidate.content_hash != repeated.content_hash
+    assert candidate.manifest["manifest_digest"] == expected_digest
+    assert repeated.manifest["manifest_digest"] == expected_digest
 
 
 def test_state_and_audit_event_roll_back_as_one_transaction(service, monkeypatch) -> None:
