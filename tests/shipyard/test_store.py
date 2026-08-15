@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -25,6 +26,7 @@ WORKSPACE_CREATED_AT = datetime(2026, 8, 15, 9, 0, tzinfo=UTC)
 WORKSPACE_UPDATED_AT = datetime(2026, 8, 15, 9, 5, tzinfo=UTC)
 RECORD_CREATED_AT = datetime(2026, 8, 15, 9, 10, tzinfo=UTC)
 ZERO_HASH = "0" * 64
+LEGACY_ARTIFACT_CREATED_AT = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 def build_workspace(workspace_id: str) -> ProjectWorkspace:
@@ -273,3 +275,88 @@ def test_artifact_task1_fields_survive_registry_restart(tmp_path: Path) -> None:
             reopened.close()
     finally:
         registry.close()
+
+
+def test_legacy_artifact_created_at_is_backfilled_and_stable_across_restarts(
+    tmp_path: Path,
+) -> None:
+    artifact = Artifact.build(
+        artifact_id="legacy-artifact",
+        project_id="legacy-project",
+        kind="DecisionContract",
+        owner="alice",
+        content={"decision": "prioritize"},
+    )
+    database = tmp_path / "legacy.db"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        CREATE TABLE artifacts (
+            project_id TEXT NOT NULL,
+            artifact_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            PRIMARY KEY (project_id, artifact_id)
+        );
+        CREATE TABLE artifact_versions (
+            project_id TEXT NOT NULL,
+            artifact_id TEXT NOT NULL,
+            version TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            status TEXT NOT NULL,
+            owner TEXT NOT NULL,
+            content_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            depends_on_json TEXT NOT NULL,
+            evidence_refs_json TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            PRIMARY KEY (project_id, artifact_id, version)
+        );
+        """
+    )
+    connection.execute(
+        "INSERT INTO artifacts(project_id, artifact_id, kind) VALUES (?, ?, ?)",
+        (artifact.project_id, artifact.artifact_id, artifact.kind),
+    )
+    connection.execute(
+        """
+        INSERT INTO artifact_versions(
+            project_id, artifact_id, version, kind, status, owner, content_json,
+            content_hash, depends_on_json, evidence_refs_json, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            artifact.project_id,
+            artifact.artifact_id,
+            artifact.version,
+            artifact.kind,
+            artifact.status,
+            artifact.owner,
+            canonical_json_bytes(artifact.content).decode("utf-8"),
+            artifact.content_hash,
+            canonical_json_bytes(artifact.depends_on).decode("utf-8"),
+            canonical_json_bytes(artifact.evidence_refs).decode("utf-8"),
+            canonical_json_bytes(artifact.metadata).decode("utf-8"),
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    first = SQLiteRegistry(database)
+    try:
+        first_created_at = first.artifacts.get(
+            artifact.project_id, artifact.artifact_id
+        ).created_at
+    finally:
+        first.close()
+
+    second = SQLiteRegistry(database)
+    try:
+        second_created_at = second.artifacts.get(
+            artifact.project_id, artifact.artifact_id
+        ).created_at
+    finally:
+        second.close()
+
+    assert first_created_at == LEGACY_ARTIFACT_CREATED_AT
+    assert second_created_at == LEGACY_ARTIFACT_CREATED_AT
+    assert first_created_at == second_created_at

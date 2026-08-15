@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -31,6 +31,10 @@ from aifde.shipyard.store import ShipyardStore
 
 
 _T = TypeVar("_T")
+
+# Legacy Artifact rows had no creation timestamp; this explicit UTC sentinel is
+# written once during migration so reads never synthesize a new timestamp.
+_LEGACY_ARTIFACT_CREATED_AT = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def _canonical_json_text(value: Any) -> str:
@@ -217,7 +221,7 @@ class SQLiteRegistry:
                 metadata_json TEXT NOT NULL,
                 parent_artifact_ids_json TEXT NOT NULL DEFAULT '[]',
                 producer TEXT,
-                created_at TEXT,
+                created_at TEXT NOT NULL,
                 validation_results_json TEXT NOT NULL DEFAULT '[]',
                 PRIMARY KEY (project_id, artifact_id, version),
                 FOREIGN KEY (project_id, artifact_id)
@@ -337,6 +341,14 @@ class SQLiteRegistry:
             "artifact_versions",
             "validation_results_json",
             "TEXT NOT NULL DEFAULT '[]'",
+        )
+        self._connection.execute(
+            """
+            UPDATE artifact_versions
+            SET created_at = ?
+            WHERE created_at IS NULL
+            """,
+            (_LEGACY_ARTIFACT_CREATED_AT.isoformat(),),
         )
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -533,8 +545,9 @@ class _SQLiteArtifactRepository:
             "producer": row["producer"],
             "validation_results": json.loads(row["validation_results_json"]),
         }
-        if row["created_at"] is not None:
-            values["created_at"] = datetime.fromisoformat(row["created_at"])
+        if row["created_at"] is None:
+            raise ValueError("stored artifact is missing created_at after schema migration")
+        values["created_at"] = datetime.fromisoformat(row["created_at"])
         return Artifact.model_validate(values)
 
 
