@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type { ShipyardApi } from "./api";
@@ -30,7 +30,7 @@ const workspace: ProjectWorkspace = {
   decision_case_ids: ["case-1"],
   artifact_ids: ["artifact-1"],
   proposal_ids: ["proposal-1"],
-  gate_review_ids: ["gate-run-1"],
+  gate_review_ids: ["gate-run-1", "gate-run-2"],
   release_candidate_ids: ["candidate-1"],
   created_at: timestamp,
   updated_at: timestamp,
@@ -110,14 +110,25 @@ const blockedGate: GateReviewSnapshot = {
   content_hash: hash("c"),
 };
 
+const releaseGovernanceGate: GateReviewSnapshot = {
+  ...blockedGate,
+  gate_run_id: "gate-run-2",
+  gate_id: "release.governance",
+  status: "passed",
+  violations: [],
+  warnings: [],
+  content_hash: hash("g"),
+};
+
 const releaseCandidate: ReleaseCandidate = {
   candidate_id: "candidate-1",
   revision: 1,
   workspace_id: "ws-1",
   artifact_ids: ["artifact-1"],
-  gate_run_ids: ["gate-run-1"],
+  gate_run_ids: ["gate-run-1", "gate-run-2"],
   manifest: {
     artifact_hashes: { "artifact-1": hash("a") },
+    gate_run_ids: ["gate-run-1", "gate-run-2"],
     manifest_digest: hash("d"),
   },
   status: "blocked",
@@ -148,32 +159,47 @@ const blockedSnapshot: WorkspaceSnapshot = {
   audit_events: [auditEvent],
 };
 
+const releaseApiSpy = vi.fn(() => Promise.resolve(releaseCandidate));
+
+const apiForSnapshot = (snapshot: WorkspaceSnapshot): ShipyardApi => ({
+  listWorkspaces: () => Promise.resolve([workspace]),
+  getSnapshot: () => Promise.resolve(snapshot),
+  createDecisionCase: () => Promise.resolve(decisionCase),
+  decideProposal: () => Promise.resolve(proposal),
+  createReleaseCandidate: releaseApiSpy,
+});
+
 export const fakeApiWithBlockedGate = {
   listWorkspaces: () => Promise.resolve([workspace]),
   getSnapshot: () => Promise.resolve(blockedSnapshot),
   createDecisionCase: () => Promise.resolve(decisionCase),
   decideProposal: () => Promise.resolve(proposal),
-  createReleaseCandidate: () => Promise.resolve(releaseCandidate),
+  createReleaseCandidate: releaseApiSpy,
 } satisfies ShipyardApi;
+
+const passedSnapshot: WorkspaceSnapshot = {
+  ...blockedSnapshot,
+  gate_reviews: [
+    {
+      ...blockedGate,
+      status: "passed",
+      violations: [],
+      warnings: [],
+    },
+    releaseGovernanceGate,
+  ],
+  release_candidates: [{ ...releaseCandidate, status: "ready" }],
+};
 
 export const fakeApiWithPassedGates: ShipyardApi = {
   ...fakeApiWithBlockedGate,
-  getSnapshot: () =>
-    Promise.resolve({
-      ...blockedSnapshot,
-      gate_reviews: [
-        {
-          ...blockedGate,
-          status: "passed",
-          violations: [],
-          warnings: [],
-        },
-      ],
-      release_candidates: [{ ...releaseCandidate, status: "ready" }],
-    }),
+  getSnapshot: () => Promise.resolve(passedSnapshot),
 };
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
 
 describe("Shipyard Workbench", () => {
   it("renders the workspace decision and blocks release when a gate is blocked", async () => {
@@ -182,6 +208,10 @@ describe("Shipyard Workbench", () => {
     expect(await screen.findByText("软件需求对齐与工期预测")).toBeVisible();
     expect(screen.getByText("Release Candidate blocked")).toBeVisible();
     expect(screen.getAllByText("semantic.integrity")[0]).toBeVisible();
+    const button = screen.getByRole("button", { name: "Create Release Candidate" });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(releaseApiSpy).not.toHaveBeenCalled();
   });
 
   it("does not expose agent approval or production action controls", async () => {
@@ -207,6 +237,97 @@ describe("Shipyard Workbench", () => {
     expect(
       screen.getByText("Available via authenticated API"),
     ).toBeVisible();
+    expect(screen.getByText(hash("c"))).toBeVisible();
+    expect(screen.getByText(hash("e"))).toBeVisible();
+    expect(screen.getByText(hash("d"))).toBeVisible();
+    const button = screen.getByRole("button", { name: "Create Release Candidate" });
+    expect(button).toBeEnabled();
+    expect(releaseApiSpy).not.toHaveBeenCalled();
+    fireEvent.click(button);
+    await waitFor(() => expect(releaseApiSpy).toHaveBeenCalledTimes(1));
+    expect(releaseApiSpy).toHaveBeenCalledWith("ws-1", {
+      artifact_ids: ["artifact-1"],
+      gate_run_ids: ["gate-run-1", "gate-run-2"],
+    });
+  });
+
+  it.each([
+    ["failed", { status: "failed", stale: false }, "failed"],
+    ["blocked", { status: "blocked", stale: false }, "blocked"],
+    ["pending", { status: "pending", stale: false }, "pending"],
+    ["stale", { status: "passed", stale: true }, "stale"],
+  ] as const)("blocks release for a current %s gate", async (_name, override, visibleStatus) => {
+    const snapshot: WorkspaceSnapshot = {
+      ...passedSnapshot,
+      gate_reviews: [
+        { ...passedSnapshot.gate_reviews[0], ...override },
+        releaseGovernanceGate,
+      ],
+    };
+    render(<App api={apiForSnapshot(snapshot)} />);
+
+    const button = await screen.findByRole("button", { name: "Create Release Candidate" });
+    expect(button).toBeDisabled();
+    expect(screen.getAllByText(visibleStatus)[0]).toBeVisible();
+  });
+
+  it("blocks release when a required gate is missing", async () => {
+    render(<App api={fakeApiWithBlockedGate} />);
+
+    const button = await screen.findByRole("button", { name: "Create Release Candidate" });
+    expect(button).toBeDisabled();
+    expect(screen.getAllByText("release.governance")[0]).toBeVisible();
+  });
+
+  it("blocks release when the current Artifact set is empty", async () => {
+    const snapshot: WorkspaceSnapshot = { ...passedSnapshot, artifacts: [] };
+    render(<App api={apiForSnapshot(snapshot)} />);
+
+    const button = await screen.findByRole("button", { name: "Create Release Candidate" });
+    expect(button).toBeDisabled();
+    expect(screen.getByText("No current Artifact is available")).toBeVisible();
+  });
+
+  it("blocks release when a Gate Review hash map mismatches current Artifacts", async () => {
+    const snapshot: WorkspaceSnapshot = {
+      ...passedSnapshot,
+      gate_reviews: passedSnapshot.gate_reviews.map((gate) => ({
+        ...gate,
+        artifact_hashes: { "artifact-1": hash("z") },
+      })),
+    };
+    render(<App api={apiForSnapshot(snapshot)} />);
+
+    const button = await screen.findByRole("button", { name: "Create Release Candidate" });
+    expect(button).toBeDisabled();
+    expect(screen.getAllByText("Gate Review artifact hashes do not match current Artifacts")[0]).toBeVisible();
+  });
+
+  it("uses the latest review for each gate instead of an older passed review", async () => {
+    const olderPassed = {
+      ...passedSnapshot.gate_reviews[0],
+      gate_run_id: "semantic-old",
+      revision: 1,
+      created_at: "2026-08-15T07:00:00.000Z",
+      status: "passed" as const,
+    };
+    const latestBlocked = {
+      ...passedSnapshot.gate_reviews[0],
+      gate_run_id: "semantic-current",
+      revision: 2,
+      created_at: "2026-08-15T09:00:00.000Z",
+      status: "blocked" as const,
+    };
+    const snapshot: WorkspaceSnapshot = {
+      ...passedSnapshot,
+      gate_reviews: [olderPassed, latestBlocked, releaseGovernanceGate],
+    };
+    render(<App api={apiForSnapshot(snapshot)} />);
+
+    const button = await screen.findByRole("button", { name: "Create Release Candidate" });
+    expect(button).toBeDisabled();
+    expect(screen.getByText(/run semantic-current/)).toBeVisible();
+    expect(screen.queryByText(/run semantic-old/)).not.toBeInTheDocument();
   });
 
   it("shows a user-visible state when the Workbench API fails", async () => {

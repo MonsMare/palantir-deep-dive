@@ -560,10 +560,10 @@ code,
 .hash-value {
   display: inline-block;
   max-width: 100%;
-  overflow: hidden;
+  overflow-wrap: anywhere;
   color: var(--violet);
   font-size: 11px;
-  text-overflow: ellipsis;
+  word-break: break-all;
   vertical-align: bottom;
 }
 
@@ -666,6 +666,20 @@ code,
   color: var(--muted-bright);
   font-size: 12px;
   font-weight: 700;
+}
+
+.release-policy {
+  display: grid;
+  gap: 7px;
+  margin-top: 17px;
+  padding-top: 13px;
+  border-top: 1px solid var(--line);
+}
+
+.release-facts {
+  margin-top: 17px;
+  padding-top: 15px;
+  border-top: 1px solid var(--line);
 }
 
 .release-api-note {

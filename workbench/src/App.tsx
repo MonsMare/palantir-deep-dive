@@ -33,6 +33,28 @@ const snapshotQueryKey = (workspaceId: string) =>
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : "Unknown API error";
 
+const DEFAULT_SOFTWARE_DELIVERY_REQUIRED_GATES = [
+  "semantic.integrity",
+  "release.governance",
+] as const;
+
+const configuredRequiredGateIds = (): string[] =>
+  (import.meta.env.VITE_SHIPYARD_REQUIRED_GATES ?? "")
+    .split(",")
+    .map((gateId: string) => gateId.trim())
+    .filter(Boolean);
+
+export function requiredGateIdsForWorkspace(workspace: ProjectWorkspace): string[] {
+  const configured = configuredRequiredGateIds();
+  if (configured.length > 0) {
+    return [...new Set(configured)];
+  }
+  if (workspace.domain_pack === "software_delivery") {
+    return [...DEFAULT_SOFTWARE_DELIVERY_REQUIRED_GATES];
+  }
+  return [];
+}
+
 const formatDate = (value: string): string => {
   const date = new Date(value);
   if (Number.isNaN(date.valueOf())) {
@@ -43,9 +65,6 @@ const formatDate = (value: string): string => {
     timeStyle: "short",
   }).format(date);
 };
-
-const shortHash = (value: string): string =>
-  value.length > 18 ? `${value.slice(0, 18)}…` : value;
 
 const statusTone = (
   value: string,
@@ -77,10 +96,148 @@ function StatusBadge({ label, tone }: { label: string; tone?: string }) {
 
 function HashValue({ value }: { value: string }) {
   return (
-    <code className="hash-value" title={value}>
-      {shortHash(value)}
+    <code className="hash-value" title={value} aria-label={`SHA-256 ${value}`}>
+      {value}
     </code>
   );
+}
+
+interface IndexedGateReview {
+  review: GateReviewSnapshot;
+  index: number;
+}
+
+export interface ReleaseBlocker {
+  gateId: string | null;
+  reason: string;
+}
+
+export interface ReleaseReadiness {
+  available: boolean;
+  requiredGateIds: string[];
+  currentGateReviews: GateReviewSnapshot[];
+  currentRequiredGates: GateReviewSnapshot[];
+  currentArtifactIds: string[];
+  currentGateRunIds: string[];
+  blockingReasons: ReleaseBlocker[];
+}
+
+function isNewerGateReview(candidate: IndexedGateReview, current: IndexedGateReview): boolean {
+  if (candidate.review.revision !== current.review.revision) {
+    return candidate.review.revision > current.review.revision;
+  }
+
+  const candidateTime = Date.parse(candidate.review.created_at);
+  const currentTime = Date.parse(current.review.created_at);
+  if (Number.isFinite(candidateTime) && Number.isFinite(currentTime) && candidateTime !== currentTime) {
+    return candidateTime > currentTime;
+  }
+  if (candidate.review.created_at !== current.review.created_at) {
+    return candidate.review.created_at > current.review.created_at;
+  }
+  return candidate.index > current.index;
+}
+
+function latestGateReviews(reviews: GateReviewSnapshot[]): GateReviewSnapshot[] {
+  const latestByGate = new Map<string, IndexedGateReview>();
+  reviews.forEach((review, index) => {
+    const candidate = { review, index };
+    const current = latestByGate.get(review.gate_id);
+    if (!current || isNewerGateReview(candidate, current)) {
+      latestByGate.set(review.gate_id, candidate);
+    }
+  });
+  return [...latestByGate.values()]
+    .sort((left, right) => left.review.gate_id.localeCompare(right.review.gate_id))
+    .map(({ review }) => review);
+}
+
+function hashesMatch(
+  actual: Record<string, string>,
+  expected: Record<string, string>,
+): boolean {
+  const actualIds = Object.keys(actual).sort();
+  const expectedIds = Object.keys(expected).sort();
+  return (
+    actualIds.length === expectedIds.length &&
+    actualIds.every(
+      (artifactId, index) =>
+        artifactId === expectedIds[index] && actual[artifactId] === expected[artifactId],
+    )
+  );
+}
+
+export function evaluateReleaseReadiness(
+  snapshot: WorkspaceSnapshot,
+  requiredGateIds: string[],
+): ReleaseReadiness {
+  const normalizedRequiredGateIds = [...new Set(
+    requiredGateIds.map((gateId) => gateId.trim()).filter(Boolean),
+  )];
+  const currentGateReviews = latestGateReviews(snapshot.gate_reviews);
+  const currentByGateId = new Map(
+    currentGateReviews.map((review) => [review.gate_id, review]),
+  );
+  const currentArtifactIds = snapshot.artifacts.map((artifact) => artifact.artifact_id);
+  const expectedArtifactHashes = Object.fromEntries(
+    snapshot.artifacts.map((artifact) => [artifact.artifact_id, artifact.content_hash]),
+  );
+  const blockingReasons: ReleaseBlocker[] = [];
+
+  if (normalizedRequiredGateIds.length === 0) {
+    blockingReasons.push({
+      gateId: null,
+      reason: "No required Gate Review policy is configured",
+    });
+  }
+  if (currentArtifactIds.length === 0) {
+    blockingReasons.push({
+      gateId: null,
+      reason: "No current Artifact is available",
+    });
+  }
+
+  const currentRequiredGates: GateReviewSnapshot[] = [];
+  for (const requiredGateId of normalizedRequiredGateIds) {
+    const review = currentByGateId.get(requiredGateId);
+    if (!review) {
+      blockingReasons.push({
+        gateId: requiredGateId,
+        reason: "missing required gate",
+      });
+      continue;
+    }
+
+    currentRequiredGates.push(review);
+    if (review.status !== "passed") {
+      blockingReasons.push({
+        gateId: requiredGateId,
+        reason: review.status,
+      });
+    }
+    if (review.stale) {
+      blockingReasons.push({
+        gateId: requiredGateId,
+        reason: "stale",
+      });
+    }
+    if (!hashesMatch(review.artifact_hashes, expectedArtifactHashes)) {
+      blockingReasons.push({
+        gateId: requiredGateId,
+        reason: "Gate Review artifact hashes do not match current Artifacts",
+      });
+    }
+  }
+
+  return {
+    available: blockingReasons.length === 0,
+    requiredGateIds: normalizedRequiredGateIds,
+    currentGateReviews,
+    currentRequiredGates,
+    currentArtifactIds,
+    currentGateRunIds: currentRequiredGates.map((review) => review.gate_run_id),
+    blockingReasons,
+  };
 }
 
 function StringList({ values, empty = "—" }: { values: string[]; empty?: string }) {
@@ -239,6 +396,15 @@ function WorkbenchScreen({ api }: AppProps) {
     refetchOnWindowFocus: false,
   });
   const mutations = useWorkbenchMutations(api);
+  const readiness = useMemo(() => {
+    if (!snapshotQuery.data) {
+      return null;
+    }
+    return evaluateReleaseReadiness(
+      snapshotQuery.data,
+      requiredGateIdsForWorkspace(snapshotQuery.data.workspace),
+    );
+  }, [snapshotQuery.data]);
 
   if (workspacesQuery.isPending) {
     return <StatusPanel title="Loading Workbench" detail="Loading workspace catalog…" />;
@@ -269,7 +435,7 @@ function WorkbenchScreen({ api }: AppProps) {
       />
     );
   }
-  if (snapshotQuery.isPending || !snapshotQuery.data) {
+  if (snapshotQuery.isPending || !snapshotQuery.data || !readiness) {
     return <StatusPanel title="Loading workspace snapshot" detail="Syncing review state…" />;
   }
 
@@ -303,13 +469,14 @@ function WorkbenchScreen({ api }: AppProps) {
           <DecisionCasePanel cases={snapshotQuery.data.decision_cases} />
           <ArtifactPanel artifacts={snapshotQuery.data.artifacts} />
           <ProposalPanel proposals={snapshotQuery.data.proposals} />
-          <GatePanel gates={snapshotQuery.data.gate_reviews} />
+          <GatePanel gates={readiness.currentGateReviews} />
         </main>
         <aside className="detail-column" aria-label="Release and audit details">
           <ReleaseCandidatePanel
             snapshot={snapshotQuery.data}
             api={api}
             mutation={mutations.createReleaseCandidate}
+            readiness={readiness}
           />
           <AuditPanel events={snapshotQuery.data.audit_events} />
           <div className="guardrail-note">
@@ -565,7 +732,7 @@ function GatePanel({ gates }: { gates: GateReviewSnapshot[] }) {
             <article className={`gate-card ${gate.stale ? "is-stale" : ""}`} key={`${gate.gate_run_id}-${gate.revision}`}>
               <div className="card-title-row">
                 <div>
-                  <p className="card-kicker">{gate.severity} gate · {gate.validator_version}</p>
+                  <p className="card-kicker">{gate.severity} gate · {gate.validator_version} · run {gate.gate_run_id}</p>
                   <h3><code>{gate.gate_id}</code></h3>
                 </div>
                 <div className="status-cluster">
@@ -574,6 +741,18 @@ function GatePanel({ gates }: { gates: GateReviewSnapshot[] }) {
                 </div>
               </div>
               <dl className="detail-grid gate-facts">
+                <div>
+                  <dt>Revision</dt>
+                  <dd>r{gate.revision}</dd>
+                </div>
+                <div>
+                  <dt>Created at</dt>
+                  <dd><time dateTime={gate.created_at}>{formatDate(gate.created_at)}</time></dd>
+                </div>
+                <div className="wide-fact">
+                  <dt>Gate Review content hash</dt>
+                  <dd><HashValue value={gate.content_hash} /></dd>
+                </div>
                 <div>
                   <dt>Violations</dt>
                   <dd><StringList values={gate.violations} empty="None" /></dd>
@@ -607,49 +786,121 @@ function GatePanel({ gates }: { gates: GateReviewSnapshot[] }) {
   );
 }
 
+function stringRecord(value: unknown): Record<string, string> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(value).filter(([, item]) => typeof item === "string"),
+  ) as Record<string, string>;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function ReleaseCandidateEvidence({ candidate }: { candidate: ReleaseCandidate }) {
+  const manifestArtifactHashes = stringRecord(candidate.manifest.artifact_hashes);
+  const manifestGateRunIds = stringArray(candidate.manifest.gate_run_ids);
+  const manifestDigest = candidate.manifest.manifest_digest;
+
+  return (
+    <dl className="detail-grid release-facts">
+      <div>
+        <dt>Candidate status</dt>
+        <dd><StatusBadge label={candidate.status} /></dd>
+      </div>
+      <div>
+        <dt>Created by</dt>
+        <dd>{candidate.created_by}</dd>
+      </div>
+      <div>
+        <dt>Created at</dt>
+        <dd><time dateTime={candidate.created_at}>{formatDate(candidate.created_at)}</time></dd>
+      </div>
+      <div>
+        <dt>Content hash</dt>
+        <dd><HashValue value={candidate.content_hash} /></dd>
+      </div>
+      <div>
+        <dt>Artifact references</dt>
+        <dd><StringList values={candidate.artifact_ids} /></dd>
+      </div>
+      <div>
+        <dt>Gate references</dt>
+        <dd><StringList values={candidate.gate_run_ids} /></dd>
+      </div>
+      <div className="wide-fact">
+        <dt>Manifest artifact hashes</dt>
+        <dd>
+          <ul className="hash-list">
+            {Object.entries(manifestArtifactHashes).map(([artifactId, artifactHash]) => (
+              <li key={artifactId}><span>{artifactId}</span><HashValue value={artifactHash} /></li>
+            ))}
+          </ul>
+        </dd>
+      </div>
+      <div>
+        <dt>Manifest gate run IDs</dt>
+        <dd><StringList values={manifestGateRunIds} /></dd>
+      </div>
+      <div>
+        <dt>Manifest digest</dt>
+        <dd>
+          {typeof manifestDigest === "string" ? <HashValue value={manifestDigest} /> : <span className="muted">—</span>}
+        </dd>
+      </div>
+    </dl>
+  );
+}
+
 function ReleaseCandidatePanel({
   snapshot,
   api,
   mutation,
+  readiness,
 }: {
   snapshot: WorkspaceSnapshot;
   api: ShipyardApi;
   mutation: ReturnType<typeof useWorkbenchMutations>["createReleaseCandidate"];
+  readiness: ReleaseReadiness;
 }) {
-  const blockingGates = useMemo(
-    () => snapshot.gate_reviews.filter((gate) => gate.status !== "passed" || gate.stale),
-    [snapshot.gate_reviews],
-  );
-  const releaseAvailable = snapshot.gate_reviews.length > 0 && blockingGates.length === 0;
   const latestCandidate = snapshot.release_candidates
     .slice()
     .sort((left, right) => right.revision - left.revision)[0];
 
   const requestCandidate = () => {
-    if (!api.createReleaseCandidate || !releaseAvailable || mutation.isPending) {
+    if (!api.createReleaseCandidate || !readiness.available || mutation.isPending) {
       return;
     }
     mutation.mutate({
       workspaceId: snapshot.workspace.workspace_id,
       input: {
-        artifact_ids: snapshot.artifacts.map((artifact) => artifact.artifact_id),
-        gate_run_ids: snapshot.gate_reviews.map((gate) => gate.gate_run_id),
+        artifact_ids: readiness.currentArtifactIds,
+        gate_run_ids: readiness.currentGateRunIds,
       },
     });
   };
 
   return (
     <Panel eyebrow="Human release boundary" title="Release Candidate" className="release-panel">
-      <div className={`release-state ${releaseAvailable ? "is-available" : "is-blocked"}`}>
+      <div className={`release-state ${readiness.available ? "is-available" : "is-blocked"}`}>
         <div className="release-state-heading">
-          <span className="release-icon" aria-hidden="true">{releaseAvailable ? "↗" : "!"}</span>
+          <span className="release-icon" aria-hidden="true">{readiness.available ? "↗" : "!"}</span>
           <div>
             <p className="card-kicker">{latestCandidate ? `${latestCandidate.candidate_id} · r${latestCandidate.revision}` : "No candidate manifest"}</p>
-            <h3>{releaseAvailable ? "Release Candidate available" : "Release Candidate blocked"}</h3>
+            <h3>{readiness.available ? "Release Candidate available" : "Release Candidate blocked"}</h3>
           </div>
         </div>
 
-        {releaseAvailable ? (
+        <div className="release-policy">
+          <span className="fact-label">Required gates</span>
+          <StringList values={readiness.requiredGateIds} empty="No policy configured" />
+        </div>
+
+        {readiness.available ? (
           <>
             <p className="release-message">All required gates passed</p>
             <p className="release-api-note">Available via authenticated API</p>
@@ -658,24 +909,22 @@ function ReleaseCandidatePanel({
           <>
             <p className="release-message">Blocking reasons</p>
             <ul className="blocking-list">
-              {blockingGates.length > 0 ? (
-                blockingGates.map((gate) => (
-                  <li key={gate.gate_run_id}>
-                    <code>{gate.gate_id}</code>
-                    <span>{gate.stale ? "stale" : gate.status}</span>
+              {readiness.blockingReasons.map((blocker, index) => (
+                  <li key={`${blocker.gateId ?? "release"}-${blocker.reason}-${index}`}>
+                    {blocker.gateId ? <code>{blocker.gateId}</code> : <code>release.guard</code>}
+                    <span>{blocker.reason}</span>
                   </li>
-                ))
-              ) : (
-                <li><span>No required Gate Review is available.</span></li>
-              )}
+              ))}
             </ul>
           </>
         )}
 
+        {latestCandidate ? <ReleaseCandidateEvidence candidate={latestCandidate} /> : null}
+
         <button
           className="release-button"
           type="button"
-          disabled={!releaseAvailable || !api.createReleaseCandidate || mutation.isPending}
+          disabled={!readiness.available || !api.createReleaseCandidate || mutation.isPending}
           onClick={requestCandidate}
         >
           {mutation.isPending ? "Requesting authenticated API…" : "Create Release Candidate"}
