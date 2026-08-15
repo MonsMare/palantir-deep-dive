@@ -308,6 +308,25 @@ def test_gate_review_recording_is_system_only_and_audited(service) -> None:
     ]
 
 
+def test_gate_review_recording_requires_gate_runner_role(service) -> None:
+    workspace = service.create_workspace(workspace_input(), human_principal())
+    artifact = Artifact.build(
+        artifact_id="artifact-1",
+        project_id=workspace.project_id,
+        kind="DecisionContract",
+        content={"objective": "forecast"},
+        owner="alice",
+    )
+    service.register_artifact(workspace.workspace_id, artifact, human_principal())
+    service.identity_provider.bind("system-worker", "system", {"worker"})
+
+    with pytest.raises(UnauthorizedError, match="gate-runner"):
+        service.record_gate_review(
+            passed_gate(workspace.workspace_id, artifact, "semantic.integrity"),
+            Principal(subject="system-worker", kind="system", roles=frozenset({"worker"})),
+        )
+
+
 def test_release_candidate_requires_current_passed_nonstale_gates(service) -> None:
     workspace = service.create_workspace(workspace_input(), human_principal())
     artifact = Artifact.build(

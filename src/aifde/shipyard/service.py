@@ -486,6 +486,10 @@ class ShipyardApplicationService:
         self, gate_review: GateReviewSnapshot, principal: Principal
     ) -> GateReviewSnapshot:
         principal = self._require_kind(principal, "system")
+        if "gate-runner" not in principal.roles:
+            raise UnauthorizedError(
+                "gate review recording requires the gate-runner role"
+            )
         if not isinstance(gate_review, GateReviewSnapshot):
             raise TypeError("gate_review must be a GateReviewSnapshot")
         try:
