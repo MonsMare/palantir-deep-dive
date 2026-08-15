@@ -4,6 +4,7 @@
 
 - 审查基线：Task 6 实现 `e493f43`；审查报告 `adfa11e` 仅作为只读输入。
 - 实现提交：`43a59b9 fix: bind Shipyard gates to verified artifact provenance`。
+- 追加身份修复提交：`13f839e fix: require gate-runner role for Gate Review writes`。
 - 本报告单独作为后续文档提交；没有修改 progress ledger。
 
 ## 本轮修复结论
@@ -43,13 +44,13 @@ pytest tests/shipyard/test_software_delivery_slice.py::test_missing_registered_a
 
 ```text
 pytest tests/shipyard/test_software_delivery_slice.py tests/e2e/test_shipyard_workbench_flow.py -q
-11 passed
+11 passed（追加 gate-runner role 修复后的专项组合验证为 12 passed）
 
 pytest tests/shipyard tests/api tests/gates -q
-117 passed
+119 passed
 
 pytest tests/shipyard tests/api tests/gates tests/e2e -q
-119 passed, 2 failed
+120 passed, 2 failed
 ```
 
 最后一个命令中的 2 个失败均是起始 clean branch 已存在、且本轮未修改的 builder persistence 问题：
