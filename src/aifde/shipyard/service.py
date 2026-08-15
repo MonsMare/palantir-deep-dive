@@ -34,6 +34,7 @@ from aifde.shipyard.provenance import (
 
 ZERO_HASH = "0" * 64
 ProposalDecision = Literal["accept", "reject", "return"]
+WorkspaceAction = Literal["read", "write", "release"]
 
 
 class StaleRevisionError(RuntimeError):
@@ -177,6 +178,39 @@ class ShipyardApplicationService:
         return principal
 
     @staticmethod
+    def _authorize_workspace(
+        principal: Principal,
+        workspace: ProjectWorkspace,
+        action: WorkspaceAction,
+    ) -> None:
+        """Apply the Phase 0 owner-only workspace policy.
+
+        Internal agent and gate-runner permissions are intentionally enforced
+        by their operation-specific kind/role checks, not by this human owner
+        policy.  They do not become human workspace owners by holding a
+        global internal role.
+        """
+
+        if principal.kind != "human":
+            raise UnauthorizedError(
+                "workspace-scoped human authorization is required for this operation"
+            )
+        if principal.subject != workspace.owner:
+            raise UnauthorizedError(
+                f"principal {principal.subject} is not authorized for workspace "
+                f"{workspace.workspace_id}"
+            )
+        required_role = {
+            "read": None,
+            "write": "workspace-owner",
+            "release": "release-owner",
+        }[action]
+        if required_role is not None and required_role not in principal.roles:
+            raise UnauthorizedError(
+                f"workspace {workspace.workspace_id} requires the {required_role} role"
+            )
+
+    @staticmethod
     def _workspace(store: Any, workspace_id: str) -> ProjectWorkspace:
         try:
             return store.get_workspace(workspace_id)
@@ -197,13 +231,25 @@ class ShipyardApplicationService:
         except KeyError as exc:
             raise RecordNotFoundError(f"decision case not found: {case_id}") from exc
 
-    def get_workspace(self, workspace_id: str) -> ProjectWorkspace:
-        """Return the current workspace projection without exposing its store."""
+    def _get_workspace_internal(self, workspace_id: str) -> ProjectWorkspace:
+        """Read a workspace for trusted builder/evaluator code only."""
 
         return self._workspace(self.registry.shipyard, workspace_id)
 
-    def list_workspaces(self) -> list[ProjectWorkspace]:
-        """Return one current projection per workspace in stable identity order."""
+    def get_workspace(
+        self, workspace_id: str, principal: Principal
+    ) -> ProjectWorkspace:
+        """Return a workspace only to its authenticated human owner."""
+
+        principal = self._require_kind(principal, "human")
+        workspace = self._workspace(self.registry.shipyard, workspace_id)
+        self._authorize_workspace(principal, workspace, "read")
+        return workspace
+
+    def list_workspaces(self, principal: Principal) -> list[ProjectWorkspace]:
+        """Return only workspaces owned by the authenticated human."""
+
+        principal = self._require_kind(principal, "human")
 
         history = self.registry.shipyard.list_workspaces()
         latest: dict[str, ProjectWorkspace] = {}
@@ -211,12 +257,18 @@ class ShipyardApplicationService:
             current = latest.get(workspace.workspace_id)
             if current is None or workspace.revision > current.revision:
                 latest[workspace.workspace_id] = workspace
-        return [latest[workspace_id] for workspace_id in sorted(latest)]
+        return [
+            latest[workspace_id]
+            for workspace_id in sorted(latest)
+            if latest[workspace_id].owner == principal.subject
+        ]
 
-    def list_decision_cases(self, workspace_id: str) -> list[DecisionCase]:
-        """Return decision cases for an existing workspace."""
+    def list_decision_cases(
+        self, workspace_id: str, principal: Principal
+    ) -> list[DecisionCase]:
+        """Return decision cases only to the workspace's human owner."""
 
-        self.get_workspace(workspace_id)
+        self.get_workspace(workspace_id, principal)
         return self.registry.shipyard.list_decision_cases(workspace_id)
 
     @staticmethod
@@ -330,6 +382,7 @@ class ShipyardApplicationService:
         def operation(transaction: Any) -> DecisionCase:
             store = transaction.shipyard
             workspace = self._workspace(store, workspace_id)
+            self._authorize_workspace(principal, workspace, "write")
             store.put_decision_case(decision_case)
             self._append_workspace_revision(
                 store,
@@ -350,15 +403,18 @@ class ShipyardApplicationService:
     def register_artifact(
         self, workspace_id: str, artifact: Artifact, principal: Principal
     ) -> Artifact:
-        principal = self._require_kind(principal, "human", "system")
+        principal = self._require_kind(principal, "human")
         if not isinstance(artifact, Artifact):
             raise TypeError("artifact must be an Artifact")
 
         def operation(transaction: Any) -> Artifact:
             store = transaction.shipyard
             workspace = self._workspace(store, workspace_id)
+            self._authorize_workspace(principal, workspace, "write")
             if artifact.project_id != workspace.project_id:
                 raise UnauthorizedError("artifact does not belong to the workspace project")
+            if artifact.owner != workspace.owner:
+                raise UnauthorizedError("artifact owner does not match the workspace owner")
             saved = transaction.artifacts.put(artifact)
             artifact_ids = list(workspace.artifact_ids)
             if saved.artifact_id not in artifact_ids:
@@ -391,6 +447,10 @@ class ShipyardApplicationService:
         principal: Principal,
     ) -> AgentProposal:
         principal = self._require_kind(principal, "agent")
+        if "builder" not in principal.roles:
+            raise UnauthorizedError(
+                "agent proposal submission requires the builder role"
+            )
         values = _model_values(proposal_input, AgentProposal, "proposal")
         supplied_workspace_id = values.get("workspace_id")
         if supplied_workspace_id is not None and supplied_workspace_id != workspace_id:
@@ -402,6 +462,11 @@ class ShipyardApplicationService:
         def operation(transaction: Any) -> AgentProposal:
             store = transaction.shipyard
             workspace = self._workspace(store, workspace_id)
+            for artifact_id in values.get("affected_artifact_ids", []):
+                if artifact_id not in workspace.artifact_ids:
+                    raise UnauthorizedError(
+                        "proposal references an Artifact outside the workspace"
+                    )
             values_for_record = dict(values)
             for field_name in (
                 "revision",
@@ -462,6 +527,7 @@ class ShipyardApplicationService:
             store = transaction.shipyard
             proposal = self._proposal(store, proposal_id)
             workspace = self._workspace(store, proposal.workspace_id)
+            self._authorize_workspace(principal, workspace, "write")
             if proposal.status != "proposed":
                 raise UnauthorizedError(
                     f"proposal {proposal_id} is not awaiting a human decision"
@@ -706,6 +772,7 @@ class ShipyardApplicationService:
         def operation(transaction: Any) -> ReleaseCandidate:
             store = transaction.shipyard
             workspace = self._workspace(store, workspace_id)
+            self._authorize_workspace(principal, workspace, "release")
             artifacts: dict[str, Artifact] = {}
             for artifact_id in requested_artifact_ids:
                 if artifact_id not in workspace.artifact_ids:
@@ -923,7 +990,9 @@ class ShipyardApplicationService:
 
         return self._write(operation)
 
-    def get_workspace_snapshot(self, workspace_id: str) -> dict[str, object]:
+    def _get_workspace_snapshot_internal(self, workspace_id: str) -> dict[str, object]:
+        """Build a snapshot for trusted bootstrap/evaluator code only."""
+
         store = self.registry.shipyard
         workspace = self._workspace(store, workspace_id)
         artifacts: list[Artifact] = []
@@ -955,6 +1024,16 @@ class ShipyardApplicationService:
             "release_candidates": release_candidates,
             "audit_events": audit_events,
         }
+
+    def get_workspace_snapshot(
+        self, workspace_id: str, principal: Principal
+    ) -> dict[str, object]:
+        """Return a workspace snapshot only to its authenticated human owner."""
+
+        principal = self._require_kind(principal, "human")
+        workspace = self._workspace(self.registry.shipyard, workspace_id)
+        self._authorize_workspace(principal, workspace, "read")
+        return self._get_workspace_snapshot_internal(workspace_id)
 
 
 __all__ = [

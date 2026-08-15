@@ -473,7 +473,9 @@ def test_seed_registers_deterministic_typed_artifacts_with_lineage(tmp_path: Pat
         assert artifacts[2].depends_on == [artifacts[1].artifact_id]
         assert artifacts[-1].depends_on == [artifacts[-2].artifact_id]
 
-        snapshot = service.get_workspace_snapshot(workspace.workspace_id)
+        snapshot = service.get_workspace_snapshot(
+            workspace.workspace_id, human_principal("alice")
+        )
         assert [artifact.artifact_id for artifact in snapshot["artifacts"]] == [
             artifact.artifact_id for artifact in artifacts
         ]

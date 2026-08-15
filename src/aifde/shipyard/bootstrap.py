@@ -98,7 +98,7 @@ def seed_software_delivery_artifacts(
     when the command is invoked from another current directory.
     """
 
-    workspace = service.get_workspace(workspace_id)
+    workspace = service._get_workspace_internal(workspace_id)
     if workspace.project_id != PROJECT_ID:
         raise ValueError(
             f"workspace {workspace_id} is not the software-delivery project"
@@ -139,9 +139,9 @@ def run_workbench_gate_snapshot(
     history.
     """
 
-    workspace = service.get_workspace(workspace_id)
+    workspace = service._get_workspace_internal(workspace_id)
     requested_ids = _normalize_artifact_ids(artifact_ids)
-    snapshot = service.get_workspace_snapshot(workspace_id)
+    snapshot = service._get_workspace_snapshot_internal(workspace_id)
     artifacts_by_id = {
         artifact.artifact_id: artifact for artifact in snapshot["artifacts"]
     }

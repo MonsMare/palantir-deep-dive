@@ -87,7 +87,9 @@ def test_workbench_review_loop_audits_human_return_and_release_manifest(
         )
         artifact_ids = [artifact.artifact_id for artifact in artifacts]
 
-        before_review = service.get_workspace_snapshot(workspace.workspace_id)
+        before_review = service.get_workspace_snapshot(
+            workspace.workspace_id, human_principal("alice")
+        )
         assert before_review["decision_cases"] == [decision_case]
         assert [artifact.artifact_id for artifact in before_review["artifacts"]] == artifact_ids
         assert before_review["gate_reviews"] == []
@@ -134,7 +136,9 @@ def test_workbench_review_loop_audits_human_return_and_release_manifest(
             human_principal("alice"),
         )
 
-        snapshot = service.get_workspace_snapshot(workspace.workspace_id)
+        snapshot = service.get_workspace_snapshot(
+            workspace.workspace_id, human_principal("alice")
+        )
         audit_types = [event.event_type for event in snapshot["audit_events"]]
         assert "workspace.created" in audit_types
         assert "decision_case.created" in audit_types

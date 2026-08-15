@@ -211,6 +211,17 @@ def test_human_agent_and_system_operations_have_separate_boundaries(service) -> 
         service.submit_agent_proposal(
             workspace.workspace_id, proposal_input(), human_principal()
         )
+    service.identity_provider.bind("agent-without-builder", "agent")
+    with pytest.raises(UnauthorizedError, match="builder"):
+        service.submit_agent_proposal(
+            workspace.workspace_id,
+            proposal_input("proposal-without-builder"),
+            Principal(
+                subject="agent-without-builder",
+                kind="agent",
+                roles=frozenset(),
+            ),
+        )
 
 
 def test_agent_proposal_is_recorded_but_does_not_change_workspace_revision(service) -> None:
@@ -223,7 +234,7 @@ def test_agent_proposal_is_recorded_but_does_not_change_workspace_revision(servi
 
     assert proposal.status == "proposed"
     assert proposal.producer == "agent-1"
-    snapshot = service.get_workspace_snapshot(workspace.workspace_id)
+    snapshot = service.get_workspace_snapshot(workspace.workspace_id, human_principal())
     assert snapshot["workspace"].revision == before
     assert snapshot["proposals"] == [proposal]
 
@@ -254,8 +265,8 @@ def test_proposal_decision_is_an_append_only_revision_and_requires_human(service
 
     assert decided.revision == proposal.revision + 1
     assert decided.status == "returned"
-    assert [item.revision for item in service.get_workspace_snapshot(workspace.workspace_id)["proposals"]] == [1, 2]
-    assert service.get_workspace_snapshot(workspace.workspace_id)["workspace"].revision == 2
+    assert [item.revision for item in service.get_workspace_snapshot(workspace.workspace_id, human_principal())["proposals"]] == [1, 2]
+    assert service.get_workspace_snapshot(workspace.workspace_id, human_principal())["workspace"].revision == 2
 
 
 def test_stale_proposal_is_persisted_as_new_revision_and_cannot_be_accepted(service) -> None:
@@ -275,10 +286,10 @@ def test_stale_proposal_is_persisted_as_new_revision_and_cannot_be_accepted(serv
     with pytest.raises(StaleRevisionError):
         service.decide_proposal(proposal.proposal_id, "accept", human_principal())
 
-    proposals = service.get_workspace_snapshot(workspace.workspace_id)["proposals"]
+    proposals = service.get_workspace_snapshot(workspace.workspace_id, human_principal())["proposals"]
     assert proposals[-1].revision == proposal.revision + 1
     assert proposals[-1].status == "stale"
-    assert service.get_workspace_snapshot(workspace.workspace_id)["workspace"].revision == 2
+    assert service.get_workspace_snapshot(workspace.workspace_id, human_principal())["workspace"].revision == 2
 
 
 def test_gate_review_recording_is_system_only_and_audited(service) -> None:
@@ -300,8 +311,8 @@ def test_gate_review_recording_is_system_only_and_audited(service) -> None:
 
     saved = service.record_gate_review(gate, system_principal())
     assert saved == gate
-    assert service.get_workspace_snapshot(workspace.workspace_id)["workspace"].revision == 3
-    assert [event.event_type for event in service.get_workspace_snapshot(workspace.workspace_id)["audit_events"]] == [
+    assert service.get_workspace_snapshot(workspace.workspace_id, human_principal())["workspace"].revision == 3
+    assert [event.event_type for event in service.get_workspace_snapshot(workspace.workspace_id, human_principal())["audit_events"]] == [
         "workspace.created",
         "artifact.registered",
         "gate_review.recorded",
@@ -517,6 +528,84 @@ def test_release_candidate_is_ready_with_deterministic_manifest(service) -> None
     assert repeated.manifest["manifest_digest"] == expected_digest
 
 
+def test_workspace_owner_policy_blocks_cross_workspace_human_access(service) -> None:
+    workspace = service.create_workspace(
+        workspace_input("ws-owner-policy"), human_principal("alice")
+    )
+    bob = human_principal("bob")
+
+    assert service.list_workspaces(bob) == []
+    with pytest.raises(UnauthorizedError, match="workspace"):
+        service.get_workspace(workspace.workspace_id, bob)
+    with pytest.raises(UnauthorizedError, match="workspace"):
+        service.list_decision_cases(workspace.workspace_id, bob)
+    with pytest.raises(UnauthorizedError, match="workspace"):
+        service.get_workspace_snapshot(workspace.workspace_id, bob)
+
+    with pytest.raises(UnauthorizedError, match="workspace"):
+        service.create_decision_case(
+            workspace.workspace_id,
+            decision_case_input("case-owner-policy"),
+            bob,
+        )
+
+    artifact = Artifact.build(
+        artifact_id="artifact-owner-policy",
+        project_id=workspace.project_id,
+        kind="DecisionContract",
+        content={"objective": "forecast"},
+        owner="alice",
+    )
+    with pytest.raises(UnauthorizedError, match="workspace"):
+        service.register_artifact(workspace.workspace_id, artifact, bob)
+
+    proposal = service.submit_agent_proposal(
+        workspace.workspace_id,
+        proposal_input("proposal-owner-policy"),
+        agent_principal(),
+    )
+    with pytest.raises(UnauthorizedError, match="workspace"):
+        service.decide_proposal(proposal.proposal_id, "return", bob)
+
+    saved = service.register_artifact(
+        workspace.workspace_id, artifact, human_principal("alice")
+    )
+    for gate_id in REQUIRED_GATES:
+        service.record_gate_review(
+            passed_gate(workspace.workspace_id, saved, gate_id),
+            system_principal(),
+        )
+    with pytest.raises(UnauthorizedError, match="workspace"):
+        service.create_release_candidate(
+            workspace.workspace_id,
+            [saved.artifact_id],
+            [f"{gate_id}:run-1" for gate_id in REQUIRED_GATES],
+            bob,
+        )
+
+    owner_snapshot = service.get_workspace_snapshot(
+        workspace.workspace_id, human_principal("alice")
+    )
+    assert owner_snapshot["workspace"].owner == "alice"
+
+    service.identity_provider.bind("read-only-owner", "human", {"release-owner"})
+    read_only_owner = Principal(
+        subject="read-only-owner",
+        kind="human",
+        roles=frozenset({"release-owner"}),
+    )
+    read_only_workspace = service.create_workspace(
+        workspace_input("ws-read-only-owner"), read_only_owner
+    )
+    assert service.get_workspace(read_only_workspace.workspace_id, read_only_owner)
+    with pytest.raises(UnauthorizedError, match="workspace-owner"):
+        service.create_decision_case(
+            read_only_workspace.workspace_id,
+            decision_case_input("case-read-only-owner"),
+            read_only_owner,
+        )
+
+
 def test_state_and_audit_event_roll_back_as_one_transaction(service, monkeypatch) -> None:
     from aifde.shipyard import service as service_module
 
@@ -529,4 +618,4 @@ def test_state_and_audit_event_roll_back_as_one_transaction(service, monkeypatch
         service.create_workspace(workspace_input(), human_principal())
 
     with pytest.raises(RecordNotFoundError):
-        service.get_workspace_snapshot("ws-1")
+        service.get_workspace_snapshot("ws-1", human_principal())

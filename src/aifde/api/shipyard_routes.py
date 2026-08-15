@@ -200,8 +200,7 @@ def build_router(service: ShipyardApplicationService) -> APIRouter:
     def list_workspaces(
         principal: Principal = Depends(identity),
     ) -> list[dict[str, Any]]:
-        del principal
-        workspaces = _service_call(service.list_workspaces)
+        workspaces = _service_call(lambda: service.list_workspaces(principal))
         return [_jsonable(workspace) for workspace in workspaces]
 
     @router.get(
@@ -212,8 +211,9 @@ def build_router(service: ShipyardApplicationService) -> APIRouter:
         workspace_id: str,
         principal: Principal = Depends(identity),
     ) -> dict[str, Any]:
-        del principal
-        workspace = _service_call(lambda: service.get_workspace(workspace_id))
+        workspace = _service_call(
+            lambda: service.get_workspace(workspace_id, principal)
+        )
         return _jsonable(workspace)
 
     @router.post(
@@ -241,9 +241,8 @@ def build_router(service: ShipyardApplicationService) -> APIRouter:
         workspace_id: str,
         principal: Principal = Depends(identity),
     ) -> list[dict[str, Any]]:
-        del principal
         decision_cases = _service_call(
-            lambda: service.list_decision_cases(workspace_id)
+            lambda: service.list_decision_cases(workspace_id, principal)
         )
         return [_jsonable(decision_case) for decision_case in decision_cases]
 
@@ -325,8 +324,9 @@ def build_router(service: ShipyardApplicationService) -> APIRouter:
         workspace_id: str,
         principal: Principal = Depends(identity),
     ) -> dict[str, Any]:
-        del principal
-        snapshot = _service_call(lambda: service.get_workspace_snapshot(workspace_id))
+        snapshot = _service_call(
+            lambda: service.get_workspace_snapshot(workspace_id, principal)
+        )
         return _jsonable(snapshot)
 
     return router

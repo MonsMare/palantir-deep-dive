@@ -445,6 +445,90 @@ def test_snapshot_is_fully_serializable_and_missing_records_are_404(
     assert missing_decisions.status_code == 404
 
 
+def test_workspace_owner_policy_blocks_cross_workspace_reads_and_writes(
+    client: TestClient,
+    service,
+) -> None:
+    created = client.post(
+        "/workspaces",
+        headers={"X-Shipyard-Identity": "alice"},
+        json=workspace_payload("ws-owner-api"),
+    )
+    assert created.status_code == 201
+
+    listed_by_bob = client.get(
+        "/workspaces", headers={"X-Shipyard-Identity": "bob"}
+    )
+    detail_by_bob = client.get(
+        "/workspaces/ws-owner-api", headers={"X-Shipyard-Identity": "bob"}
+    )
+    decisions_by_bob = client.get(
+        "/workspaces/ws-owner-api/decision-cases",
+        headers={"X-Shipyard-Identity": "bob"},
+    )
+    snapshot_by_bob = client.get(
+        "/workspaces/ws-owner-api/snapshot",
+        headers={"X-Shipyard-Identity": "bob"},
+    )
+    decision_write_by_bob = client.post(
+        "/workspaces/ws-owner-api/decision-cases",
+        headers={"X-Shipyard-Identity": "bob"},
+        json=decision_case_payload("case-owner-api"),
+    )
+
+    submitted = client.post(
+        "/workspaces/ws-owner-api/proposals",
+        headers={"X-Shipyard-Identity": "agent-1"},
+        json=proposal_payload("proposal-owner-api"),
+    )
+    proposal_decision_by_bob = client.post(
+        "/proposals/proposal-owner-api/decision",
+        headers={"X-Shipyard-Identity": "bob"},
+        json={"decision": "return"},
+    )
+
+    artifact = Artifact.build(
+        artifact_id="artifact-owner-api",
+        project_id="project-1",
+        kind="DecisionContract",
+        content={"objective": "forecast"},
+        owner="alice",
+    )
+    service.register_artifact(
+        "ws-owner-api",
+        artifact,
+        service.identity_provider.resolve({"subject": "alice"}),
+    )
+    for gate_id in sorted(REQUIRED_GATES):
+        gate = client.post(
+            "/workspaces/ws-owner-api/gate-reviews",
+            headers={"X-Shipyard-Identity": "gate-runner"},
+            json=gate_payload(gate_id, artifact),
+        )
+        assert gate.status_code == 201
+    release_by_bob = client.post(
+        "/workspaces/ws-owner-api/release-candidates",
+        headers={"X-Shipyard-Identity": "bob"},
+        json={
+            "artifact_ids": [artifact.artifact_id],
+            "gate_run_ids": [
+                "release.governance:run-1",
+                "semantic.integrity:run-1",
+            ],
+        },
+    )
+
+    assert listed_by_bob.status_code == 200
+    assert listed_by_bob.json() == []
+    assert detail_by_bob.status_code == 403
+    assert decisions_by_bob.status_code == 403
+    assert snapshot_by_bob.status_code == 403
+    assert decision_write_by_bob.status_code == 403
+    assert submitted.status_code == 201
+    assert proposal_decision_by_bob.status_code == 403
+    assert release_by_bob.status_code == 403
+
+
 def test_workbench_router_is_only_mounted_when_service_is_supplied(tmp_path) -> None:
     registry = SQLiteRegistry(tmp_path / "legacy.db")
     try:

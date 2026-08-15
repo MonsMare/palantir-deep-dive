@@ -28,6 +28,8 @@ Phase 0 的可运行交付物是一个本地、可审计的 Shipyard Workbench r
 - `scripts/shipyard_seed.py` 只创建本地 SQLite Workbench 数据库，演示 Workspace → Decision Case → Artifact → Gate Review 的初始化链路；不会连接 Linear、客户系统或执行生产 Action；
 - Workbench API/UI 可以读取这些 Artifact、Proposal、Gate Review、Audit 和 Release Candidate，并在 required gates 未通过或过期时阻止发布资格；
 - 所有记录写入继续经过 `ShipyardApplicationService`，Agent 只能提交 Proposal，不能审批自身、改变 Gate 或创建 Release Candidate。
+- Phase 0 使用 owner-only 的 workspace 资源授权：已验证 human 只能读取自己拥有的 Workspace；创建 Decision Case、登记 Artifact、决定 Proposal 需要实际 `workspace.owner` 与 `workspace-owner` role，创建 Release Candidate 需要 owner 与 `release-owner` role。API 的 GET 也把已验证 Principal 传入 Service；成员 ACL 后续再扩展；
+- `agent` 且具备 `builder` role 的内部身份只能提交 Agent Proposal，`system` 且具备 `gate-runner` role 的内部身份只能记录 Gate Review；二者不是 human workspace owner。bootstrap/evaluator 的读取走明确的 private/internal Service helper，不提供无 Principal 的公开读取绕过。
 
 这一阶段明确不交付：客户生产 runtime、完整 ML Evaluation Lab、生产级 ERP/Jira/身份/消息 connector、Docker/高可用部署、自动执行客户 Action，以及 Linear 人机协作适配器。Phase 0 证明的是“可以在 Shipyard 中审阅并判断一个候选系统是否具备 release eligibility”，不是“已经把系统部署到客户侧持续预测和决策”。
 
