@@ -1,4 +1,4 @@
-"""Optional Streamlit read-only cockpit for the AI FDE project."""
+"""Optional legacy Streamlit read-only cockpit for Shipyard sandbox data."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ FetchJson = Callable[[str], Any]
 
 @dataclass(frozen=True)
 class CockpitSnapshot:
-    """Read-only API data rendered by the project cockpit."""
+    """Read-only API data rendered by the sandbox cockpit."""
 
     project_id: str
     stages: list[JsonDict] = field(default_factory=list)
@@ -59,7 +59,7 @@ def load_project_cockpit(
     api_base_url: str = "http://localhost:8000",
     fetch_json: FetchJson | None = None,
 ) -> CockpitSnapshot:
-    """Load a project cockpit snapshot through read-only API endpoints."""
+    """Load a sandbox cockpit snapshot through read-only API endpoints."""
 
     if not isinstance(project_id, str) or not project_id.strip():
         raise ValueError("project_id must be a non-empty string")
@@ -105,7 +105,7 @@ def render_dashboard(
     api_base_url: str = "http://localhost:8000",
     fetch_json: FetchJson | None = None,
 ) -> CockpitSnapshot:
-    """Render the read-only project cockpit with optional Streamlit."""
+    """Render the read-only sandbox cockpit with optional Streamlit."""
 
     try:
         import streamlit as st
@@ -120,7 +120,7 @@ def render_dashboard(
         fetch_json=fetch_json,
     )
 
-    st.title("AI FDE Project Cockpit")
+    st.title("AI-FDE Shipyard Sandbox Cockpit")
     st.caption("Read-only gate, approval, question, and artifact review surface.")
 
     st.subheader("Project")

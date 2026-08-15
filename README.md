@@ -1,15 +1,30 @@
-# Palantir-like AI-FDE 工程内核
+# AI-FDE Shipyard
 
-本仓库是一个以证据、Ontology、可计算特征、预测、决策优化和受治理动作闭环为主线的 AI-FDE 研究与验证项目。
+本仓库的唯一主线是：构建一个能够持续产出、评测、发布和升级客户业务决策系统的 AI-FDE Shipyard。
 
-当前实现已经把 `supplier-delay` 和 `software-delivery` 做成两个可运行的 Domain Pack，并提供：
+这里的比喻关系是：
+
+```text
+AI-FDE Shipyard（船坞）
+  → 构建、验证、评测、打包和交付
+客户业务决策系统（轮船）
+  → 在客户环境中持续接收数据、预测、决策并执行经授权的业务动作
+```
+
+Shipyard 可以在沙箱和历史回放中运行目标系统的副本，用来证明其语义、数据、模型、决策、工作流和治理质量；它不承担客户生产环境中的持续预测、决策或业务动作执行。
+
+当前仓库已经具备 Shipyard 所需的一组 Python 工程内核，并把 `supplier-delay` 与 `software-delivery` 作为可运行的领域样板：
 
 - SourceConnector、EvidenceFragment、数据产品和字段级 provenance；
 - RDFS/SHACL Ontology IR 编译与 release gate；
-- point-in-time Feature/Label/Prediction/Decision runtime；
-- Model Registry、时间评估、确定性优化和 Action Broker；
-- 领域 Agent 团队、追加式 Artifact Workspace、DAG、预算和 stale 门禁；
-- audit、metrics、readiness 和双领域端到端验收。
+- point-in-time Feature/Label/Prediction/Decision 沙箱运行时；
+- Model Registry、时间评估、确定性优化和受治理 Action 模拟；
+- 领域 Agent、追加式 Artifact Workspace、DAG、预算和 stale 门禁；
+- audit、metrics、readiness 和跨领域端到端验收。
+
+这些运行时模块是 Shipyard 用来构建和评测“轮船”的参考内核，不代表 AI-FDE 自己就是客户生产运行时。
+
+设计主线从 [AI-FDE Shipyard Workbench 设计](docs/superpowers/specs/2026-08-15-ai-fde-shipyard-workbench-design.md) 开始。Workbench 是当前人机协作界面；Linear、客户生产运行时和复杂多租户部署均属于后续边界，不是当前核心构建目标。
 
 从测试开始：
 
@@ -18,6 +33,6 @@ pytest -q
 python -m compileall -q src tests
 ```
 
-完整的生产边界、验收证据和上线前替换项见：[生产 AI-FDE 增强验收说明](docs/production-ai-fde-acceptance.md)。
+Shipyard 内核的能力边界和交付验收见：[AI-FDE Shipyard 内核验收说明](docs/production-ai-fde-acceptance.md)；文档入口见：[docs/README.md](docs/README.md)。
 
-本项目中的本地文件连接器、SQLite、JSONL Action adapter 和 deterministic solver 是可替换的工程边界，不等同于已经接入真实 ERP/Jira 或获得客户生产动作授权。
+本项目中的本地文件连接器、SQLite、JSONL Action adapter 和 deterministic solver 是可替换的构建/评测边界，不等同于已经接入真实 ERP/Jira 或获得客户生产动作授权。

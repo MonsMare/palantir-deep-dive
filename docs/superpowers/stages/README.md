@@ -1,6 +1,6 @@
-# AI-FDE 分阶段设计文档索引
+# AI-FDE Shipyard 分阶段设计文档索引
 
-本目录把 AI-FDE 的下一阶段拆成可以独立评审、独立实施和独立验收的阶段文档。每份文档都规定同一组边界：目标、前置条件、输入、输出、核心工作、数据契约、门禁、失败处理、验收标准和后续接口。
+本目录把 Shipyard 的构建阶段拆成可以独立评审、独立实施和独立验收的阶段文档。每份文档都规定同一组边界：目标、前置条件、输入、输出、核心工作、数据契约、门禁、失败处理、验收标准和后续接口。文档中的“生产”指客户侧交付系统的目标能力，不指 Agent 在 Shipyard 内直接承担客户生产运行。
 
 ## 总体路线
 
@@ -21,7 +21,7 @@
     ├─ P1 单领域、单任务图
     ├─ P2 专业 Agent 分工
     ├─ P3 并发、冲突与成本控制
-    └─ P4 生产领域团队
+    └─ P4 交付系统领域团队
 ```
 
 ## A. 证据驱动 Ontology Builder
@@ -48,7 +48,7 @@
 | P1 | [单领域、单任务图](domain-agent-team/P1-single-domain-task-graph.md) | TaskContract、Artifact Workspace、基本编排 |
 | P2 | [专业 Agent 分工](domain-agent-team/P2-specialist-agent-roles.md) | 专业角色、输入输出契约、交接协议 |
 | P3 | [并发、冲突与成本控制](domain-agent-team/P3-concurrency-conflict-cost.md) | DAG 调度、锁、挑战、重试和预算 |
-| P4 | [生产领域团队](domain-agent-team/P4-production-domain-team.md) | 供应商延误端到端领域团队、Action、反馈运营 |
+| P4 | [交付系统领域团队](domain-agent-team/P4-production-domain-team.md) | 供应商延误端到端构建、沙箱验证、Action 契约和反馈运营 |
 
 ## 阶段通用门禁
 

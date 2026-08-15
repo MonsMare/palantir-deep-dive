@@ -1,8 +1,8 @@
-# Evidence-Driven Ontology Builder Implementation Plan
+# Shipyard Evidence-Driven Ontology Builder Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement the next AI-FDE stage that turns messy enterprise source material into traceable evidence, semantic candidates, executable mappings, a validated business Ontology candidate, and a gated release package using deterministic simulated supplier-delay data.
+**Goal:** Implement the Shipyard Builder stage that turns messy enterprise source material into traceable evidence, semantic candidates, executable mappings, a validated business Ontology candidate, and a gated release package using deterministic simulated supplier-delay data.
 
 **Architecture:** Add an isolated `aifde.builder` package on top of the verified AI-FDE domain, registry, RDF, and Gate Engine foundations. The Builder is append-only at the source/evidence boundary, separates immutable evidence from mutable candidates, and compiles candidates into a canonical data product plus RDFS/SHACL-compatible ontology artifacts. Candidate generation is deterministic in the demo but exposed through a provider protocol so an LLM can later propose candidates without receiving publish or write privileges.
 
@@ -298,4 +298,4 @@ Commit: `feat: run gated evidence-driven ontology builder`
 - [x] Ontology and SHACL artifacts are rendered and validated.
 - [x] Hard gate failure blocks release and the Builder cannot approve itself.
 - [x] The supplier-delay demo releases the clean case and blocks the unresolved conflict case.
-- [x] The full existing AI-FDE Builder and software-delivery demo regression remains green.
+- [x] The full existing Shipyard kernel and software-delivery demo regression remains green.

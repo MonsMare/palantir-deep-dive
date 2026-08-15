@@ -6,7 +6,7 @@ from aifde.task.contracts import TaskContract
 
 def _contract(**overrides):
     values = {
-        "task_id": "linear:LAC-1",
+        "task_id": "shipyard:task-1",
         "project_id": "demo",
         "domain_pack": "software_delivery",
         "task_kind": "forecast",

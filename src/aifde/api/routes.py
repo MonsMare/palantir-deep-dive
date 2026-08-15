@@ -1,4 +1,4 @@
-"""Route registration for the AI FDE project cockpit."""
+"""Route registration for Shipyard build, review, gate, and release APIs."""
 
 from __future__ import annotations
 

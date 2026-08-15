@@ -1,4 +1,4 @@
-"""FastAPI application factory for the AI FDE project cockpit."""
+"""FastAPI application factory for the AI-FDE Shipyard API."""
 
 from __future__ import annotations
 
@@ -24,12 +24,12 @@ def create_app(
 
     if FastAPI is None:  # pragma: no cover - dependency is present in API test env
         raise RuntimeError(
-            "FastAPI is required for the AI FDE API; install the optional API dependency"
+            "FastAPI is required for the AI-FDE Shipyard API; install the optional API dependency"
         )
 
     from .routes import build_router
 
-    app = FastAPI(title="AI FDE Project Cockpit")
+    app = FastAPI(title="AI-FDE Shipyard API")
     app.state.registry = registry
     app.state.gate_engine = gate_engine
     app.state.stage_runner = stage_runner

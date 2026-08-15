@@ -1,14 +1,14 @@
-# P4：生产领域 Agent 团队阶段设计
+# P4：交付系统领域 Agent 团队阶段设计
 
 ## 1. 阶段定位
 
-P4 将前面各阶段组合成一个可运营的领域系统。它不是“多个聊天机器人”，而是围绕已发布 Ontology、数据产品、预测、决策和 Action 的受控闭环。
+P4 在 Shipyard 内将前面各阶段组合成一个可交付、可评测的领域系统。它不是“多个聊天机器人”，而是围绕已发布 Ontology、数据产品、预测、决策和 Action 的受控闭环。P4 负责构建和沙箱验证这艘“轮船”，不由 Shipyard Agent 直接承担客户生产运行。
 
 ## 2. 输入与输出
 
 输入：S7 `OntologyReleasePackage`、发布的 DataProductVersion、Evidence Index、Access Policy、模型/决策版本和用户业务工作台。
 
-输出：PredictionArtifact、CandidatePlan、ActionRequest、ActionOutcome、Feedback、ActualOutcome、运营指标和下一轮评估任务。
+输出：PredictionArtifact、CandidatePlan、ActionRequest、ActionOutcome 模拟回执、Feedback、ActualOutcome、运营指标和下一轮评估任务，最终汇入 `DecisionSystemRelease`。
 
 ## 3. 端到端场景：供应商延误风险
 
@@ -25,9 +25,9 @@ P4 将前面各阶段组合成一个可运营的领域系统。它不是“多�
 7. Decision/Optimization Agent 将预测导入约束问题，比较催交、替代供应商、调整生产顺序和继续观察方案。
 8. Challenger 检查未来泄漏、错误归因、不可替代订单、权限和置信度阈值。
 9. Domain Owner 审核业务语义，Release Owner 批准上线；Application Agent 把风险队列、证据、方案和审批入口嵌入采购工作台。
-10. 用户批准后创建 ActionRequest，经 Policy/Action Broker 执行；ActionOutcome、实际到货和用户反馈回写 Ontology/data product，进入模型评估与运营。
+10. 在 Shipyard 沙箱中模拟用户批准、ActionRequest、Policy/Action Broker 和 ActionOutcome；实际交付时由客户侧运行时执行动作，回执、实际到货和用户反馈再按协议回写 Shipyard，进入模型评估与升级。
 
-## 4. 生产 Artifact 链
+## 4. 交付 Artifact 链
 
 ```text
 OntologyReleasePackage
@@ -41,11 +41,11 @@ OntologyReleasePackage
 
 每一层必须保留输入 hash、版本、evidence refs、权限、owner 和 gate run。Prediction 不是事实，CandidatePlan 不是执行结果，ActionRequest 不是 ActionOutcome。
 
-## 5. 用户交互与嵌入
+## 5. 目标系统的用户交互与嵌入
 
 用户不应被迫离开工作系统进入孤立聊天窗口。Application Agent 将风险排序、解释、来源、置信度、候选方案、成本/约束、审批按钮和反馈入口嵌入采购工作台、订单详情、异常队列和日报。聊天只作为解释和查询入口，所有改变现实的动作都走 ActionRequest、审批和 Action Broker。
 
-## 6. 生产质量与运营
+## 6. 交付系统质量与运营契约
 
 监控四类指标：
 
@@ -56,9 +56,9 @@ OntologyReleasePackage
 
 模型只在评估、漂移和反馈门禁通过后更新；高风险动作默认 human-in-the-loop。
 
-## 7. 门禁
+## 7. 交付门禁
 
-生产 Action 前必须通过 contract、evidence、semantic、data quality、temporal safety、adversarial、business acceptance 和 release governance 门禁。高风险动作必须有人工批准；模型低置信度、权限不足、方案不可行或 Action 执行失败时不得自动升级权限。
+客户生产 Action 的交付包必须通过 contract、evidence、semantic、data quality、temporal safety、adversarial、business acceptance 和 release governance 门禁。高风险动作必须配置人工批准；模型低置信度、权限不足、方案不可行或 Action 执行失败时不得自动升级权限。
 
 ## 8. 失败和降级
 
@@ -69,13 +69,13 @@ OntologyReleasePackage
 - 用户可以在原业务流程中看到风险、证据、方案和审批入口。
 - 任一预测可回放到 feature snapshot、data product、mapping、evidence 和 source。
 - 任一方案可解释目标、约束、预测输入、成本和不可行原因。
-- 未审批 Action 不会写入生产系统。
+- 未审批 Action 不会进入客户生产运行时的写入路径。
 - 实际结果和用户反馈能回写并形成下一轮评估样本。
 - 领域团队能在数据冲突、模型低置信度、权限不足和 Action 失败时安全降级。
 
 ## 10. 下游接口
 
-P4 的输出进入业务运营和反馈评估，不直接替代领域 owner。新领域复制时复用 TaskContract、Artifact Workspace、Gate Engine、Action Broker 和反馈协议，并重新完成本领域语义与权限审核。
+P4 的输出进入 Release Dock、客户侧部署包和反馈评估，不直接替代领域 owner。新领域复制时复用 TaskContract、Artifact Workspace、Gate Engine、Action Broker 和反馈协议，并重新完成本领域语义与权限审核。
 
 ## 11. 阶段结论
 

@@ -1,4 +1,4 @@
-"""First-party Domain Packs used by the production-like examples."""
+"""First-party Domain Packs used by Shipyard build and evaluation examples."""
 
 from .base import DomainAdapter, DomainCapture, DomainCompiler
 from aifde.platform.domain_pack import DomainPack

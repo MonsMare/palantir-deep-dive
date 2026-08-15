@@ -1,4 +1,4 @@
-"""Append-only feedback service for the AI FDE learning loop."""
+"""Append-only feedback service for Shipyard release evaluation and upgrades."""
 
 from __future__ import annotations
 

@@ -1,9 +1,9 @@
 # 领域 Agent 团队设计
 
-状态：设计稿，待评审
-适用阶段：证据驱动 Ontology Builder 之后
+状态：Shipyard 后续阶段设计（待接入 Workbench）
+适用阶段：证据驱动 Ontology Builder 和数据产品通过后
 上游：已批准的 Ontology、数据产品、证据索引、权限策略
-下游：分析/预测/决策模型、业务应用、受控 Action 和反馈运营
+下游：Evaluation Lab、Workflow Builder、DecisionSystemRelease 和交付反馈
 核心原则：专业分工、Artifact 交接、独立挑战、确定性验证、人类批准
 
 ## 1. 文档目的
@@ -14,7 +14,7 @@
 
 > 面向一个业务领域的 Agent 工程组织：每个 Agent 拥有明确职责、输入输出契约、工具权限和质量标准，通过共享 Artifact Workspace 协作，由 Gate Engine 控制阶段晋级，由人类承担业务和发布责任。
 
-本阶段默认消费《证据驱动的 Ontology Builder》发布的：
+本阶段默认消费 Shipyard《证据驱动的 Ontology Builder》发布的：
 
 - OntologyReleasePackage；
 - DataProductRelease；
@@ -23,7 +23,7 @@
 - ProvenanceGraph；
 - GateRun 和 Approval。
 
-如果上游 Ontology 仍处于候选状态，领域 Agent 只能提出设计建议，不得使用其结果驱动生产预测或 Action。
+如果上游 Ontology 仍处于候选状态，领域 Agent 只能提出设计建议，不得使用其结果驱动目标系统的正式评测结论、发布包或客户生产 Action。
 
 ## 2. 能力目标与边界
 
@@ -41,7 +41,7 @@
 8. 在输入、提示、工具、模型和配置变化时重新验证；
 9. 对冲突、失败、超时和低置信结果进行升级；
 10. 让 Domain Owner 审核业务含义，让 Release Owner 批准发布；
-11. 将已批准产物交给应用和 Action 层；
+11. 将已批准产物交给 Workflow Builder 和 Release Dock，形成客户侧运行时的交付包；
 12. 将实际结果和用户反馈回写为后续评估输入。
 
 ### 2.2 Agent 不能拥有的权力
@@ -134,7 +134,7 @@
 - 解释目标贡献、资源变化、风险和假设；
 - 不把不可行方案伪装成推荐方案。
 
-### 3.8 Application Agent
+### 3.8 Workflow/Application Builder Agent
 
 职责：
 
@@ -672,7 +672,7 @@ Agent 权限必须由平台根据可信身份和任务上下文签发，不能�
 - 开始和结束时间；
 - 错误和重试。
 
-## 13. 生产运行监控
+## 13. 交付系统运行监控契约
 
 必须监控四类指标：
 
@@ -764,7 +764,7 @@ Agent 权限必须由平台根据可信身份和任务上下文签发，不能�
 
 验收：同时处理多个独立子任务时，结果不互相覆盖；预算耗尽会安全暂停。
 
-### P4：生产领域团队
+### P4：交付系统领域团队
 
 必要功能：
 

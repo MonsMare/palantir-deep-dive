@@ -29,7 +29,7 @@ from aifde.task.lifecycle import (
 
 def _contract(**overrides):
     values = {
-        "task_id": "linear:LAC-1",
+        "task_id": "shipyard:task-1",
         "project_id": "demo",
         "domain_pack": "software_delivery",
         "task_kind": "forecast",
@@ -48,7 +48,7 @@ def _context(
     fix_round=0,
     max_fix_rounds=3,
     run_id="run-1",
-    task_id="linear:LAC-1",
+    task_id="shipyard:task-1",
 ):
     contract = _contract(task_id=task_id, max_fix_rounds=max_fix_rounds)
     version = TaskContractVersion(contract=contract, version=1)
@@ -224,7 +224,7 @@ def test_transition_requires_a_real_registered_run():
     ("field", "value"),
     [
         ("contract_version", 2),
-        ("task_id", "linear:OTHER"),
+        ("task_id", "shipyard:other-task"),
         ("run_id", "run-2"),
     ],
 )
@@ -260,7 +260,7 @@ def test_transition_requires_a_run_and_derives_audit_identity_from_it():
         )
 
     event = lifecycle.apply(registry.get("run-1"), "gates_pass", **_kwargs(resolver))
-    assert event.task_id == "linear:LAC-1"
+    assert event.task_id == "shipyard:task-1"
     assert event.run_id == "run-1"
     assert event.contract_version == 1
 
@@ -307,7 +307,7 @@ def test_apply_derives_new_state_and_only_lifecycle_can_create_task_event():
     with pytest.raises(TypeError, match="lifecycle"):
         TaskEvent(
             event_id="forged-event",
-            task_id="linear:LAC-1",
+            task_id="shipyard:task-1",
             event_name="authorized_approval",
             actor="agent-1",
             authority=ActorAuthority.HUMAN,
@@ -328,7 +328,7 @@ def test_apply_derives_new_state_and_only_lifecycle_can_create_task_event():
     with pytest.raises(TypeError, match="lifecycle"):
         TaskEvent.model_construct(
             event_id="forged-construct",
-            task_id="linear:LAC-1",
+            task_id="shipyard:task-1",
             event_name="authorized_approval",
             actor="agent-1",
             authority=ActorAuthority.HUMAN,

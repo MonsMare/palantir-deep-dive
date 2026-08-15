@@ -1,4 +1,4 @@
-"""Append-only persistence for production Builder provenance and releases."""
+"""Append-only persistence for Shipyard Builder provenance and releases."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""HTTP API for the AI FDE project cockpit."""
+"""Shipyard HTTP API for build, review, gate, and release operations."""
 
 from .app import create_app
 from .routes import (

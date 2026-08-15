@@ -1,14 +1,14 @@
 # 证据驱动的 Ontology Builder 设计
 
-状态：设计稿，待评审
-适用阶段：AI-FDE 下一阶段
+状态：Shipyard Builder 阶段设计（待接入 Workbench）
+适用阶段：Shipyard 的证据与 Ontology 构建阶段
 上游：业务立项、需求提炼、工作流观察、原始资料接入
-下游：领域 Agent 团队、分析/预测/决策工程、业务应用交付
+下游：领域 Agent 团队、Evaluation Lab、DecisionSystemRelease 交付
 核心原则：AI 生成候选，证据约束语义，门禁控制发布，人类承担业务确认
 
 ## 1. 文档目的
 
-本文定义“证据驱动的 Ontology Builder”阶段的生产级目标、架构、对象、流程、接口、门禁和验收标准。
+本文定义 Shipyard 中“证据驱动的 Ontology Builder”阶段的生产级构建目标、架构、对象、流程、接口、门禁和验收标准。
 
 本阶段解决的问题不是“把表字段转换成 RDF”，而是：
 
@@ -771,4 +771,4 @@ ERP 采购订单
 - Ontology Release Manager；
 - 连接器、schema drift 和运行监控。
 
-本设计完成后，下一步应单独生成实施计划，按 P1 到 P4 将每个组件拆成测试优先的工程任务。
+本设计的产物由 Shipyard Workbench 的 Ontology Studio、Data Product Studio 和 Gate Review 消费；它描述构建与评测边界，不承担客户生产运行时或生产 Action 的持续执行。
