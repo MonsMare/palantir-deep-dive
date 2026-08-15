@@ -58,3 +58,61 @@ $ pytest -q --tb=no
 
 - 全仓仍有既有 builder/SHACL 相关 14 failures，以及 builder SQLite 初始化相关 13 errors；这些在 Task 3 之前的基线中已存在，本次未触碰相关代码。
 - 本任务未扩展 API，后续 Task 4 仍需把认证上下文解析和 Service 错误映射接入 HTTP 边界。
+
+## Fix round 1
+
+本轮只处理 reviewer 标记的两个 Important；M-1 空 Gate 错误文字和 M-2 Gate revision/created_at 分配顺序按要求延后。
+
+### 红灯
+
+先新增未绑定/mismatched Principal、显式 provider 必填和稳定 manifest digest 测试：
+
+```text
+$ pytest tests/shipyard/test_service.py -q
+.FF............F.                                                        [100%]
+3 failed, 14 passed
+```
+
+失败分别证明：Service 仍默认创建 FakeIdentityProvider、未绑定/roles 不匹配 Principal 仍可写入，以及 manifest 尚无 `manifest_digest`。
+
+### 绿灯
+
+修复后：
+
+```text
+$ pytest tests/shipyard/test_service.py -q
+.................                                                        [100%]
+17 passed in 3.13s
+```
+
+### Fix round 1 回归
+
+```text
+$ pytest tests/shipyard/test_service.py tests/task tests/gates -q
+........................................................................ [ 74%]
+.........................                                                [100%]
+97 passed in 3.26s
+```
+
+```text
+$ pytest tests/shipyard/test_contracts.py tests/shipyard/test_store.py tests/api/test_sqlite_registry_routes.py -q
+.................                                                        [100%]
+17 passed in 2.04s
+```
+
+```text
+$ pytest tests/api -q
+.......................                                                  [100%]
+23 passed in 2.24s
+```
+
+### Fix round 1 自审
+
+- I-1：`ShipyardApplicationService` 现在拒绝 `identity_provider=None`，也拒绝没有 `verify(principal)` 能力的 provider；`IdentityProvider.verify` 返回 canonical Principal，`FakeIdentityProvider.verify` 按 subject、kind、roles 与显式 binding 精确匹配。所有 Service kind 检查都先经过实例 provider 验证，因此未绑定、kind 不匹配或 roles 不匹配的 Principal 不能写入。
+- I-2：Service 对排序后的 `artifact_hashes` 和 `gate_run_ids` 组成 canonical JSON，计算并保存 `manifest["manifest_digest"]`；调用者不能提供或覆盖该值。既有 `manifest["artifact_hashes"]` 映射保留，Registry 会随完整 ReleaseCandidate payload 持久化 digest。
+- 新测试创建两个不同 candidate ID/content hash、输入顺序不同的候选，确认 `manifest_digest` 相同且等于 canonical SHA-256；Task 1 合同、Task 2 Registry、SQLite schema 与 API 均未修改。
+- 未实现 Task 4，未处理 reviewer 指定的两个 Minor。
+
+### Fix round 1 提交
+
+- 实现与测试提交：`3970719` (`fix: enforce Shipyard identity and manifest digest`)
