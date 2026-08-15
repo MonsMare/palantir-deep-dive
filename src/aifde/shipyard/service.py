@@ -132,6 +132,28 @@ class ShipyardApplicationService:
         except KeyError as exc:
             raise RecordNotFoundError(f"decision case not found: {case_id}") from exc
 
+    def get_workspace(self, workspace_id: str) -> ProjectWorkspace:
+        """Return the current workspace projection without exposing its store."""
+
+        return self._workspace(self.registry.shipyard, workspace_id)
+
+    def list_workspaces(self) -> list[ProjectWorkspace]:
+        """Return one current projection per workspace in stable identity order."""
+
+        history = self.registry.shipyard.list_workspaces()
+        latest: dict[str, ProjectWorkspace] = {}
+        for workspace in history:
+            current = latest.get(workspace.workspace_id)
+            if current is None or workspace.revision > current.revision:
+                latest[workspace.workspace_id] = workspace
+        return [latest[workspace_id] for workspace_id in sorted(latest)]
+
+    def list_decision_cases(self, workspace_id: str) -> list[DecisionCase]:
+        """Return decision cases for an existing workspace."""
+
+        self.get_workspace(workspace_id)
+        return self.registry.shipyard.list_decision_cases(workspace_id)
+
     @staticmethod
     def _append_workspace_revision(
         store: Any,

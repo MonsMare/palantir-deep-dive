@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from aifde.policy.capabilities import PolicyEngine
+from aifde.shipyard.service import ShipyardApplicationService
 
 try:
     from fastapi import FastAPI
@@ -19,6 +20,7 @@ def create_app(
     action_broker: Any,
     policy: PolicyEngine | None = None,
     governed_action_broker: Any | None = None,
+    shipyard_service: ShipyardApplicationService | None = None,
 ) -> Any:
     """Build the HTTP app around the already-authoritative domain services."""
 
@@ -46,4 +48,9 @@ def create_app(
             governed_action_broker=governed_action_broker,
         )
     )
+    if shipyard_service is not None:
+        from .shipyard_routes import build_router as build_shipyard_router
+
+        app.state.shipyard_service = shipyard_service
+        app.include_router(build_shipyard_router(shipyard_service))
     return app
