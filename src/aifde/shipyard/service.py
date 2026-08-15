@@ -20,6 +20,7 @@ from aifde.shipyard.contracts import (
     ProjectWorkspace,
     ReleaseCandidate,
 )
+from aifde.shipyard.evaluator import build_software_delivery_gate_reviews
 from aifde.shipyard.identity import (
     IdentityProvider,
     Principal,
@@ -89,6 +90,44 @@ def _has_provenance(gate_review: GateReviewSnapshot) -> bool:
         or gate_review.input_snapshot_hash
         or gate_review.definition_fingerprint
     )
+
+
+def _assert_software_gate_review_matches_evaluator(
+    actual: GateReviewSnapshot,
+    expected: GateReviewSnapshot,
+) -> None:
+    """Reject any complete review that is not the governed evaluator outcome."""
+
+    if actual.outcome_attestation != expected.outcome_attestation:
+        raise ReleaseBlockedError(
+            f"Gate Review {actual.gate_run_id} outcome attestation does not match "
+            "the governed evaluator"
+        )
+    compared_fields = (
+        "gate_run_id",
+        "gate_id",
+        "severity",
+        "status",
+        "artifact_hashes",
+        "artifact_versions",
+        "source_snapshot_id",
+        "source_snapshot_hash",
+        "input_snapshot_hash",
+        "validator_version",
+        "definition_fingerprint",
+        "violations",
+        "warnings",
+        "evidence_refs",
+        "stale",
+    )
+    for field_name in compared_fields:
+        if getattr(actual, field_name) != getattr(expected, field_name):
+            readable_field_name = field_name.replace("_", " ")
+            raise ReleaseBlockedError(
+                f"Gate Review {actual.gate_run_id} outcome attestation "
+                f"{readable_field_name} does not match the governed evaluator outcome "
+                "or current source snapshot"
+            )
 
 
 class ShipyardApplicationService:
@@ -509,7 +548,39 @@ class ShipyardApplicationService:
                     raise RecordNotFoundError(
                         f"gate review references Artifact outside workspace: {artifact_id}"
                     )
-            if gate_review.status == "passed" and _has_provenance(gate_review):
+            if workspace.project_id == "software-delivery-demo" and _has_provenance(
+                gate_review
+            ):
+                current_artifacts: list[Artifact] = []
+                for artifact_id in sorted(gate_review.artifact_hashes):
+                    try:
+                        current_artifacts.append(
+                            transaction.artifacts.get(workspace.project_id, artifact_id)
+                        )
+                    except KeyError as exc:
+                        raise ReleaseBlockedError(
+                            f"Gate Review {gate_review.gate_run_id} references an unavailable Artifact"
+                        ) from exc
+                expected_reviews = build_software_delivery_gate_reviews(
+                    workspace.workspace_id,
+                    self.required_gate_ids,
+                    current_artifacts,
+                    source_root=_source_root_for_project(workspace.project_id),
+                )
+                expected = next(
+                    (
+                        review
+                        for review in expected_reviews
+                        if review.gate_id == gate_review.gate_id
+                    ),
+                    None,
+                )
+                if expected is None:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {gate_review.gate_run_id} is not a required gate"
+                    )
+                _assert_software_gate_review_matches_evaluator(gate_review, expected)
+            elif gate_review.status == "passed" and _has_provenance(gate_review):
                 current_artifacts: list[Artifact] = []
                 for artifact_id in sorted(gate_review.artifact_hashes):
                     try:
@@ -672,6 +743,18 @@ class ShipyardApplicationService:
                     "software-delivery release must cover all six seeded Artifacts"
                 )
 
+            expected_software_reviews: dict[str, GateReviewSnapshot] = {}
+            if workspace.project_id == "software-delivery-demo":
+                expected_software_reviews = {
+                    review.gate_id: review
+                    for review in build_software_delivery_gate_reviews(
+                        workspace.workspace_id,
+                        self.required_gate_ids,
+                        list(artifacts.values()),
+                        source_root=_source_root_for_project(workspace.project_id),
+                    )
+                }
+
             reviews = store.list_gate_reviews()
             by_run_id = {review.gate_run_id: review for review in reviews}
             requested_reviews: list[GateReviewSnapshot] = []
@@ -717,6 +800,13 @@ class ShipyardApplicationService:
                     raise ReleaseBlockedError(
                         f"Gate Review {review.gate_run_id} does not reference current Artifact hashes"
                     )
+                if workspace.project_id == "software-delivery-demo":
+                    expected = expected_software_reviews.get(review.gate_id)
+                    if expected is None:
+                        raise ReleaseBlockedError(
+                            f"Gate Review {review.gate_run_id} is not a required gate"
+                        )
+                    _assert_software_gate_review_matches_evaluator(review, expected)
 
             reviewed_gate_ids = {review.gate_id for review in requested_reviews}
             missing_gate_ids = sorted(self.required_gate_ids - reviewed_gate_ids)

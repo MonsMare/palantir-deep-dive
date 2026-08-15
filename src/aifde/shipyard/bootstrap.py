@@ -17,12 +17,13 @@ from typing import Any, TYPE_CHECKING
 import yaml
 
 from aifde.domain.artifacts import Artifact
-from aifde.gates.engine import GateEngine
 from aifde.shipyard.contracts import GateReviewSnapshot, ProjectWorkspace
+from aifde.shipyard.evaluator import build_software_delivery_gate_reviews
 from aifde.shipyard.identity import Principal, UnauthorizedError
 from aifde.shipyard.provenance import (
+    SOFTWARE_DELIVERY_ARTIFACT_ORDER,
     SOFTWARE_DELIVERY_ARTIFACT_IDS,
-    build_artifact_input_snapshot,
+    SOFTWARE_DELIVERY_ARTIFACT_SPECS,
 )
 from aifde.shipyard.service import RecordNotFoundError
 
@@ -35,7 +36,6 @@ WORKSPACE_ID = "workspace:software-delivery-demo"
 SEED_PRODUCER = "shipyard-seed"
 SEED_VERSION = "software-delivery-seed-v1"
 SEED_CREATED_AT = datetime(2026, 8, 15, 0, 0, tzinfo=timezone.utc)
-GATE_SNAPSHOT_CREATED_AT = datetime(2026, 8, 15, 0, 5, tzinfo=timezone.utc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,32 +46,14 @@ class _AssetSpec:
     format: str
 
 
-@dataclass(frozen=True, slots=True)
-class _SandboxPipelineReport:
-    """Small local report shape used when optional demo dependencies are absent."""
-
-    stage_states: dict[str, str]
-    evidence_refs: list[str]
-
-
-_ASSET_SPECS: tuple[_AssetSpec, ...] = (
-    _AssetSpec("project-charter", "config/project.yaml", "ProjectCharter", "yaml"),
-    _AssetSpec("decision-contract", "decisions/problem.yaml", "DecisionContract", "yaml"),
-    _AssetSpec("ontology-model", "ontology/domain.ttl", "OntologyModel", "turtle"),
-    _AssetSpec("data-product", "data_products/contracts.yaml", "DataProduct", "yaml"),
-    _AssetSpec("feature-catalog", "features/definitions.yaml", "FeatureCatalog", "yaml"),
-    _AssetSpec("model-policy", "models/model_policy.yaml", "ModelPolicy", "yaml"),
-)
-
-_RELEASE_GOVERNANCE_STAGES = frozenset(
-    {
-        "requirements.alignment",
-        "ontology.design",
-        "data_product.build",
-        "prediction.validation",
-        "decision.optimization",
-        "application.acceptance",
-    }
+_ASSET_SPECS: tuple[_AssetSpec, ...] = tuple(
+    _AssetSpec(
+        SOFTWARE_DELIVERY_ARTIFACT_SPECS[artifact_id].key,
+        SOFTWARE_DELIVERY_ARTIFACT_SPECS[artifact_id].relative_path,
+        SOFTWARE_DELIVERY_ARTIFACT_SPECS[artifact_id].kind,
+        SOFTWARE_DELIVERY_ARTIFACT_SPECS[artifact_id].format,
+    )
+    for artifact_id in SOFTWARE_DELIVERY_ARTIFACT_ORDER
 )
 
 
@@ -198,55 +180,13 @@ def run_workbench_gate_snapshot(
             source_violations.append(
                 "requested source root cannot switch the registered source snapshot"
             )
-    input_snapshot = build_artifact_input_snapshot(
+    return build_software_delivery_gate_reviews(
+        workspace.workspace_id,
+        service.required_gate_ids,
         artifacts,
         source_root=source_root,
+        extra_violations=source_violations,
     )
-    source_violations.extend(input_snapshot.violations)
-    if source_violations:
-        report = _SandboxPipelineReport(
-            stage_states={},
-            evidence_refs=["pipeline:software-delivery:source-preflight:blocked"],
-        )
-    else:
-        report = _run_sandbox_pipeline(str(source_root))
-    stage_states = report.stage_states
-    evidence_refs = _snapshot_evidence_refs(
-        report.evidence_refs,
-        workspace,
-        input_snapshot.evidence_refs,
-    )
-    engine = GateEngine()
-    reviews: list[GateReviewSnapshot] = []
-    for gate_id in sorted(service.required_gate_ids):
-        definition = engine.get_definition(gate_id)
-        status, violations = _gate_status(gate_id, stage_states)
-        violations = sorted(set([*source_violations, *violations]))
-        reviews.append(
-            GateReviewSnapshot(
-                gate_run_id=(
-                    f"snapshot:{workspace_id}:{gate_id}:{input_snapshot.input_snapshot_hash[:16]}"
-                ),
-                revision=1,
-                workspace_id=workspace.workspace_id,
-                gate_id=gate_id,
-                severity=definition.severity,
-                status=status,
-                artifact_hashes=input_snapshot.artifact_hashes,
-                artifact_versions=input_snapshot.artifact_versions,
-                source_snapshot_id=input_snapshot.source_snapshot_id,
-                source_snapshot_hash=input_snapshot.source_snapshot_hash,
-                input_snapshot_hash=input_snapshot.input_snapshot_hash,
-                validator_version=definition.validator_version,
-                definition_fingerprint=definition.definition_fingerprint,
-                violations=violations,
-                warnings=[],
-                evidence_refs=evidence_refs,
-                stale=input_snapshot.stale or bool(source_violations),
-                created_at=GATE_SNAPSHOT_CREATED_AT,
-            )
-        )
-    return reviews
 
 
 def _project_root(value: Path) -> Path:
@@ -341,70 +281,6 @@ def _read_document(raw_bytes: bytes, spec: _AssetSpec) -> Any:
         return text
     document = yaml.safe_load(text)
     return {} if document is None else document
-
-
-def _run_sandbox_pipeline(project_root: str):
-    """Run the deterministic demo or return a blocking unavailable report.
-
-    The normal path executes the existing local ``software_delivery_demo``
-    pipeline.  A minimal Python environment may not contain the demo's
-    optional Polars/ML dependencies; in that case the snapshot remains
-    blocked instead of pretending that evaluation passed.  The fallback is
-    still local and contains no connector or Action call.
-    """
-
-    try:
-        from software_delivery_demo.pipeline import run_demo_pipeline
-    except ModuleNotFoundError as exc:
-        if exc.name not in {"polars", "sklearn", "rdflib", "pyshacl"}:
-            raise
-        return _SandboxPipelineReport(
-            stage_states={},
-            evidence_refs=[
-                "pipeline:software-delivery:sandbox-unavailable:v1",
-                f"pipeline:software-delivery:missing-dependency:{exc.name}",
-            ],
-        )
-    return run_demo_pipeline(Path(project_root))
-
-
-def _snapshot_evidence_refs(
-    pipeline_refs: list[str],
-    workspace: ProjectWorkspace,
-    input_refs: list[str],
-) -> list[str]:
-    refs = {
-        f"pipeline:software-delivery:{workspace.project_id}:sandbox:v1",
-        *pipeline_refs,
-        *input_refs,
-    }
-    return sorted(refs)
-
-
-def _gate_status(
-    gate_id: str,
-    stage_states: dict[str, str],
-) -> tuple[str, list[str]]:
-    if gate_id == "semantic.integrity":
-        stage_id = "ontology.design"
-        passed = stage_states.get(stage_id) in {"approved", "passed"}
-        return (
-            "passed" if passed else "blocked",
-            [] if passed else [f"sandbox pipeline stage blocked: {stage_id}"],
-        )
-    if gate_id == "release.governance":
-        blocked = sorted(
-            stage_id
-            for stage_id in _RELEASE_GOVERNANCE_STAGES
-            if stage_states.get(stage_id) not in {"approved", "passed"}
-        )
-        return (
-            "passed" if not blocked else "blocked",
-            [] if not blocked else [
-                "sandbox pipeline stages blocked: " + ", ".join(blocked)
-            ],
-        )
-    raise ValueError(f"software-delivery gate adapter does not define {gate_id}")
 
 
 __all__ = [

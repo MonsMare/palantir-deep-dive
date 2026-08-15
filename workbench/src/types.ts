@@ -95,6 +95,7 @@ export interface GateReviewSnapshot {
   input_snapshot_hash?: string;
   validator_version: string;
   definition_fingerprint?: string;
+  outcome_attestation?: string;
   violations: string[];
   warnings: string[];
   evidence_refs: string[];

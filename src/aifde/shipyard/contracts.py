@@ -239,6 +239,7 @@ class GateReviewSnapshot(_FrozenContract):
     input_snapshot_hash: str = ""
     validator_version: str
     definition_fingerprint: str = ""
+    outcome_attestation: str = ""
     violations: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
@@ -275,7 +276,12 @@ class GateReviewSnapshot(_FrozenContract):
     def normalize_source_snapshot_id(cls, value: str) -> str:
         return value if not value else _nonblank(value, "source_snapshot_id")
 
-    @field_validator("source_snapshot_hash", "input_snapshot_hash", "definition_fingerprint")
+    @field_validator(
+        "source_snapshot_hash",
+        "input_snapshot_hash",
+        "definition_fingerprint",
+        "outcome_attestation",
+    )
     @classmethod
     def normalize_provenance_hash(cls, value: str, info: Any) -> str:
         return value if not value else _sha256(value, info.field_name)

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from aifde.registry.sqlite import SQLiteRegistry
+from aifde.shipyard import evaluator as evaluator_module
 from aifde.shipyard.identity import FakeIdentityProvider, Principal
 from aifde.shipyard.service import ReleaseBlockedError, ShipyardApplicationService
 
@@ -89,6 +90,7 @@ def test_software_delivery_workbench_blocks_then_allows_release(tmp_path: Path) 
         } for review in initial_reviews)
         assert all(review.validator_version for review in initial_reviews)
         assert all(review.evidence_refs for review in initial_reviews)
+        assert all(review.outcome_attestation for review in initial_reviews)
         assert all(review.stale is False for review in initial_reviews)
 
         passed_reviews = [
@@ -217,6 +219,154 @@ def test_registered_artifact_source_mismatch_blocks_snapshot_and_release(
         registry.close()
 
 
+def test_fixed_artifact_source_mapping_cannot_be_repointed_to_another_legal_asset(
+    tmp_path: Path,
+) -> None:
+    registry, service = build_shipyard_test_runtime(tmp_path)
+    try:
+        workspace = seed_software_delivery_workspace(service, PROJECT_ROOT, "alice")
+        artifacts = seed_software_delivery_artifacts(
+            service, workspace.workspace_id, "alice"
+        )
+        repointed = artifacts[2].model_copy(
+            update={
+                "version": "2.0.0",
+                "content": artifacts[0].content,
+                "evidence_refs": artifacts[0].evidence_refs,
+                "metadata": artifacts[0].metadata,
+            }
+        )
+        service.register_artifact(
+            workspace.workspace_id,
+            repointed,
+            human_principal("alice"),
+        )
+
+        reviews = run_workbench_gate_snapshot(
+            service,
+            workspace.workspace_id,
+            [artifact.artifact_id for artifact in artifacts],
+        )
+        assert all(review.status == "blocked" for review in reviews)
+        assert all(review.stale for review in reviews)
+        assert any(
+            "expected source" in violation or "mapping" in violation
+            for review in reviews
+            for violation in review.violations
+        )
+    finally:
+        registry.close()
+
+
+def test_artifact_semantic_content_error_blocks_gate_snapshot(
+    tmp_path: Path,
+) -> None:
+    registry, service = build_shipyard_test_runtime(tmp_path)
+    try:
+        workspace = seed_software_delivery_workspace(service, PROJECT_ROOT, "alice")
+        artifacts = seed_software_delivery_artifacts(
+            service, workspace.workspace_id, "alice"
+        )
+        invalid_ontology = artifacts[2].model_copy(
+            update={
+                "version": "2.0.0",
+                "content": {
+                    "source_ref": artifacts[2].content["source_ref"],
+                    "format": "turtle",
+                    "document": "not a Turtle ontology",
+                },
+            }
+        )
+        service.register_artifact(
+            workspace.workspace_id,
+            invalid_ontology,
+            human_principal("alice"),
+        )
+
+        reviews = run_workbench_gate_snapshot(
+            service,
+            workspace.workspace_id,
+            [artifact.artifact_id for artifact in artifacts],
+        )
+        assert all(review.status == "blocked" for review in reviews)
+        assert all(review.stale for review in reviews)
+        assert any(
+            "semantic" in violation.lower()
+            for review in reviews
+            for violation in review.violations
+        )
+    finally:
+        registry.close()
+
+
+def test_evaluator_evidence_covers_each_registered_artifact(
+    tmp_path: Path,
+) -> None:
+    registry, service = build_shipyard_test_runtime(tmp_path)
+    try:
+        workspace = seed_software_delivery_workspace(service, PROJECT_ROOT, "alice")
+        artifacts = seed_software_delivery_artifacts(
+            service, workspace.workspace_id, "alice"
+        )
+        reviews = run_workbench_gate_snapshot(
+            service,
+            workspace.workspace_id,
+            [artifact.artifact_id for artifact in artifacts],
+        )
+        assert all(review.status == "passed" for review in reviews)
+        for artifact in artifacts:
+            prefix = f"artifact-evaluator:{artifact.artifact_id}:"
+            assert all(
+                any(reference.startswith(prefix) for reference in review.evidence_refs)
+                for review in reviews
+            )
+    finally:
+        registry.close()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"status": "passed"},
+        {"violations": []},
+        {"stale": False},
+        {"gate_run_id": "forged-gate-run"},
+        {"outcome_attestation": "0" * 64},
+    ],
+)
+def test_blocked_evaluator_outcome_cannot_be_rewritten(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: dict[str, object],
+) -> None:
+    monkeypatch.setattr(
+        evaluator_module,
+        "run_sandbox_pipeline",
+        lambda _root: evaluator_module.SandboxPipelineReport(
+            stage_states={},
+            evidence_refs=["pipeline:fixture:blocked"],
+        ),
+    )
+    registry, service = build_shipyard_test_runtime(tmp_path)
+    try:
+        workspace = seed_software_delivery_workspace(service, PROJECT_ROOT, "alice")
+        artifacts = seed_software_delivery_artifacts(
+            service, workspace.workspace_id, "alice"
+        )
+        reviews = run_workbench_gate_snapshot(
+            service,
+            workspace.workspace_id,
+            [artifact.artifact_id for artifact in artifacts],
+        )
+        assert all(review.status == "blocked" for review in reviews)
+        target = reviews[0].model_copy(update=mutation)
+
+        with pytest.raises(ReleaseBlockedError, match="attestation"):
+            service.record_gate_review(target, system_principal())
+    finally:
+        registry.close()
+
+
 def test_gate_review_run_id_must_bind_to_current_evaluator_input(
     tmp_path: Path,
 ) -> None:
@@ -238,15 +388,11 @@ def test_gate_review_run_id_must_bind_to_current_evaluator_input(
             for review in reviews
         ]
         for review in forged_reviews:
-            service.record_gate_review(review, system_principal())
-
-        with pytest.raises(ReleaseBlockedError, match="evaluator run"):
-            service.create_release_candidate(
-                workspace.workspace_id,
-                artifact_ids,
-                [review.gate_run_id for review in forged_reviews],
-                human_principal("alice"),
-            )
+            if review.gate_id == target_gate_id:
+                with pytest.raises(ReleaseBlockedError, match="attestation"):
+                    service.record_gate_review(review, system_principal())
+            else:
+                service.record_gate_review(review, system_principal())
     finally:
         registry.close()
 

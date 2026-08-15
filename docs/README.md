@@ -24,7 +24,7 @@
   → required gates 全部通过后生成 Release Candidate manifest
 ```
 
-Gate snapshot 不是把 Registry hash map 附加到一个独立 pipeline 结果：sandbox evaluator 启动前会对六类已注册 Artifact 做固定 source snapshot 的来源 SHA、内容 hash、版本和 evidence 一致性检查，并把 source/input snapshot hash 与当前 validator/definition fingerprint 写入 Gate Review。缺失、错配或无法执行评测时保持 blocked/stale；Application Service 在生成 Candidate 前会再次验证这些绑定，不能通过把 blocked review 改成 passed 来绕过门禁。
+Gate snapshot 不是把 Registry hash map 附加到一个独立 pipeline 结果：受治理 evaluator 会按固定的六个 Artifact ID → source asset/kind/format 映射，从 Registry 读取并语义解析每个 Artifact 的 canonical content，再与对应源文件做内容/hash/evidence 一致性检查。每个 Artifact 的输入 digest 和 semantic result 都写入 evidence；sandbox pipeline 只能作为额外检查。结果还包含覆盖 status、stale、violations、输入/来源 hash、validator/fingerprint、evidence 和 stage states 的 outcome attestation。缺失、错配、语义错误或无法执行评测时保持 blocked/stale；Application Service 在记录 Review 和生成 Candidate 前会重跑同一 deterministic evaluator 并验证 attestation，不能通过把 blocked review 改成 passed 来绕过门禁。
 
 可用命令：
 

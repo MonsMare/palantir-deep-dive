@@ -21,8 +21,10 @@ Shipyard 的职责是构建、验证、评测、打包、交付和升级；客�
 Phase 0 的可运行交付物是一个本地、可审计的 Shipyard Workbench review/release-eligibility slice：
 
 - `seed_software_delivery_workspace`、`seed_software_delivery_artifacts` 从仓库内的软件交付资产创建 Workspace 和 typed Artifact；每个 Artifact 保留版本、内容哈希、证据引用、来源哈希、依赖和 `producer="shipyard-seed"`；
-- `run_workbench_gate_snapshot` 在 sandbox 中调用确定性的 `software_delivery_demo.pipeline`，但在 evaluator 之前先校验六类已注册 Artifact 的版本、内容哈希、来源文件 SHA、来源内容和 evidence reference 是否属于同一个固定 source snapshot；结果携带 `source_snapshot_id/hash`、input snapshot hash、Artifact hashes/versions、当前 Gate definition fingerprint、evidence references、violations 和 stale 状态；任何缺失或不一致都生成 blocked/stale（无法构造真实输入时 fail closed），snapshot 由调用方使用绑定的 system gate-runner 经 Application Service 记录；
+- `run_workbench_gate_snapshot` 使用 evaluator 固定的六个 Artifact ID → source asset/kind/format 映射，不接受 Artifact 自报的 `source_path` 作为权威；evaluator 从 Registry 读取每个已注册 Artifact 的 canonical content，同时读取对应 source asset，做内容/hash 一致性和类型结构语义校验。每个 Artifact 都会生成输入 digest、semantic result 和 evidence reference；任何缺失、错配、未参与评测或语义错误都生成 blocked/stale，sandbox pipeline 只能作为额外检查；
+- snapshot 还携带 `source_snapshot_id/hash`、input snapshot hash、Artifact hashes/versions、当前 Gate definition fingerprint、evidence references、violations 和 stale 状态，以及覆盖 gate/run/status/stale/violations/Artifact-input-source hash/validator/fingerprint/evidence/stage states 的 `outcome_attestation`；无法构造真实评测输入或 sandbox 没有 stage state 时 fail closed，不能把 blocked 结果复制成 passed；snapshot 由调用方使用绑定的 system gate-runner 经 Application Service 记录；
 - Release eligibility 不信任调用方自报的 passed/stale/validator/evidence：Application Service 会重新读取当前 Artifact 和固定 source snapshot，校验 required gates、当前 validator/definition fingerprint、Artifact 输入版本/哈希、当前 input/source snapshot 及绑定 evidence；旧验证器、空 evidence、输入或证据过期、被伪装成 passed 的 blocked review 都不能生成 ready Candidate；
+- 对完整 provenance 的软件交付 Gate Review，Application Service 会用同一受治理 deterministic evaluator 重建 outcome，并逐字段验证 `outcome_attestation`；修改 status、violations、stale、gate_run_id、输入/来源 hash、evidence 或 validator/fingerprint 的 review 都不能写入或取得 release eligibility。旧 Task 1–5 的兼容性 GateReview 形状仍可写入，但不获得本切片的 release eligibility；
 - `scripts/shipyard_seed.py` 只创建本地 SQLite Workbench 数据库，演示 Workspace → Decision Case → Artifact → Gate Review 的初始化链路；不会连接 Linear、客户系统或执行生产 Action；
 - Workbench API/UI 可以读取这些 Artifact、Proposal、Gate Review、Audit 和 Release Candidate，并在 required gates 未通过或过期时阻止发布资格；
 - 所有记录写入继续经过 `ShipyardApplicationService`，Agent 只能提交 Proposal，不能审批自身、改变 Gate 或创建 Release Candidate。
@@ -59,7 +61,7 @@ Phase 0 的可运行交付物是一个本地、可审计的 Shipyard Workbench r
 
 - `src/aifde/shipyard/bootstrap.py` 是构建侧适配器，不是客户运行时；
 - seed 资产只来自 `projects/software-delivery-demo` 中的配置、决策、Ontology、数据产品、特征和模型策略文件；
-- 缺少本地 demo pipeline 的可选评测依赖时，Gate snapshot 会保持 `blocked`，不会把“无法评测”伪装成通过；
+- 缺少本地 demo pipeline 的可选评测依赖或没有可验证 stage state 时，Gate snapshot 会保持 `blocked/stale`，不会把“无法评测”伪装成通过；
 - `software_delivery_demo.pipeline` 中的 Action 仍是本地 Mock/sandbox 行为，不代表已连接或写入任何客户生产系统。
 
 ### 2.5 目标系统的沙箱验证

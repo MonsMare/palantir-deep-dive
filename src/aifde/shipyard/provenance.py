@@ -5,23 +5,90 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import yaml
 
 from aifde.domain.artifacts import Artifact, canonical_json_bytes, content_hash_for
 
 
-SOFTWARE_DELIVERY_ARTIFACT_IDS = frozenset(
-    {
-        "artifact:software-delivery-demo:project-charter",
-        "artifact:software-delivery-demo:decision-contract",
-        "artifact:software-delivery-demo:ontology-model",
-        "artifact:software-delivery-demo:data-product",
-        "artifact:software-delivery-demo:feature-catalog",
-        "artifact:software-delivery-demo:model-policy",
-    }
+@dataclass(frozen=True, slots=True)
+class SoftwareDeliveryArtifactSpec:
+    """Evaluator-owned source and semantic contract for one seed Artifact."""
+
+    key: str
+    relative_path: str
+    kind: str
+    format: str
+    required_keys: tuple[str, ...] = ()
+
+
+SOFTWARE_DELIVERY_ARTIFACT_ORDER = (
+    "artifact:software-delivery-demo:project-charter",
+    "artifact:software-delivery-demo:decision-contract",
+    "artifact:software-delivery-demo:ontology-model",
+    "artifact:software-delivery-demo:data-product",
+    "artifact:software-delivery-demo:feature-catalog",
+    "artifact:software-delivery-demo:model-policy",
 )
+
+SOFTWARE_DELIVERY_ARTIFACT_SPECS: Mapping[str, SoftwareDeliveryArtifactSpec] = {
+    SOFTWARE_DELIVERY_ARTIFACT_ORDER[0]: SoftwareDeliveryArtifactSpec(
+        key="project-charter",
+        relative_path="config/project.yaml",
+        kind="ProjectCharter",
+        format="yaml",
+        required_keys=(
+            "seed",
+            "teams",
+            "people",
+            "modules",
+            "sprints",
+            "requirements",
+            "work_items",
+            "change_requests",
+            "start_date",
+            "sprint_length_days",
+            "ingestion_delay_days",
+        ),
+    ),
+    SOFTWARE_DELIVERY_ARTIFACT_ORDER[1]: SoftwareDeliveryArtifactSpec(
+        key="decision-contract",
+        relative_path="decisions/problem.yaml",
+        kind="DecisionContract",
+        format="yaml",
+        required_keys=("variables", "objective_terms", "hard_constraints"),
+    ),
+    SOFTWARE_DELIVERY_ARTIFACT_ORDER[2]: SoftwareDeliveryArtifactSpec(
+        key="ontology-model",
+        relative_path="ontology/domain.ttl",
+        kind="OntologyModel",
+        format="turtle",
+    ),
+    SOFTWARE_DELIVERY_ARTIFACT_ORDER[3]: SoftwareDeliveryArtifactSpec(
+        key="data-product",
+        relative_path="data_products/contracts.yaml",
+        kind="DataProduct",
+        format="yaml",
+        required_keys=("products", "quality_rules"),
+    ),
+    SOFTWARE_DELIVERY_ARTIFACT_ORDER[4]: SoftwareDeliveryArtifactSpec(
+        key="feature-catalog",
+        relative_path="features/definitions.yaml",
+        kind="FeatureCatalog",
+        format="yaml",
+        required_keys=("features",),
+    ),
+    SOFTWARE_DELIVERY_ARTIFACT_ORDER[5]: SoftwareDeliveryArtifactSpec(
+        key="model-policy",
+        relative_path="models/model_policy.yaml",
+        kind="ModelPolicy",
+        format="yaml",
+        required_keys=("release_policy",),
+    ),
+}
+
+SOFTWARE_DELIVERY_ARTIFACT_IDS = frozenset(SOFTWARE_DELIVERY_ARTIFACT_SPECS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,19 +142,40 @@ def build_artifact_input_snapshot(
         metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
         source_path_value = metadata.get("source_path")
         declared_source_sha = metadata.get("source_sha256")
-        source_path = str(source_path_value).strip() if source_path_value else ""
+        declared_source_path = (
+            str(source_path_value).strip() if source_path_value else ""
+        )
         declared_source_sha = (
             str(declared_source_sha).strip() if declared_source_sha else ""
         )
+        fixed_spec = (
+            SOFTWARE_DELIVERY_ARTIFACT_SPECS.get(artifact.artifact_id)
+            if artifact.project_id == "software-delivery-demo"
+            else None
+        )
+        source_path = fixed_spec.relative_path if fixed_spec else declared_source_path
         observed_source_sha = declared_source_sha or artifact.content_hash
         record: dict[str, Any] = {
             "artifact_id": artifact.artifact_id,
             "version": artifact.version,
             "content_hash": artifact.content_hash,
             "source_path": source_path,
+            "declared_source_path": declared_source_path,
             "source_sha256": observed_source_sha,
             "evidence_refs": sorted(set(artifact.evidence_refs)),
         }
+
+        if fixed_spec is not None:
+            if declared_source_path != fixed_spec.relative_path:
+                violations.append(
+                    f"Artifact {artifact.artifact_id} expected source mapping is "
+                    f"{fixed_spec.relative_path}, got {declared_source_path or '<missing>'}"
+                )
+            if artifact.kind != fixed_spec.kind:
+                violations.append(
+                    f"Artifact {artifact.artifact_id} expected kind {fixed_spec.kind}, "
+                    f"got {artifact.kind}"
+                )
 
         if normalized_root is not None:
             if not source_path or not declared_source_sha:
@@ -117,6 +205,7 @@ def build_artifact_input_snapshot(
                             artifact,
                             raw_bytes,
                             source_path,
+                            expected_format=fixed_spec.format if fixed_spec else None,
                         )
                     )
 
@@ -163,6 +252,8 @@ def _content_consistency_violations(
     artifact: Artifact,
     raw_bytes: bytes,
     source_path: str,
+    *,
+    expected_format: str | None = None,
 ) -> list[str]:
     content = artifact.content
     if not isinstance(content, dict):
@@ -173,6 +264,11 @@ def _content_consistency_violations(
         return [f"Artifact {artifact.artifact_id} source reference is missing"]
     expected_source_ref = f"source:{artifact.project_id}/{source_path}"
     violations: list[str] = []
+    if expected_format is not None and content_format != expected_format:
+        violations.append(
+            f"Artifact {artifact.artifact_id} expected format {expected_format}, "
+            f"got {content_format or '<missing>'}"
+        )
     if source_ref != expected_source_ref:
         violations.append(
             f"Artifact {artifact.artifact_id} source reference does not match source path"
@@ -181,14 +277,18 @@ def _content_consistency_violations(
         violations.append(
             f"Artifact {artifact.artifact_id} source reference is not in evidence_refs"
         )
-    if content_format == "turtle":
-        document: Any = raw_bytes.decode("utf-8")
-    elif content_format == "yaml":
-        document = yaml.safe_load(raw_bytes.decode("utf-8"))
-        document = {} if document is None else document
-    else:
+    parse_format = expected_format or content_format
+    try:
+        if parse_format == "turtle":
+            document: Any = raw_bytes.decode("utf-8")
+        elif parse_format == "yaml":
+            document = yaml.safe_load(raw_bytes.decode("utf-8"))
+            document = {} if document is None else document
+        else:
+            raise ValueError(f"unsupported source format: {parse_format}")
+    except (UnicodeDecodeError, ValueError, yaml.YAMLError) as exc:
         violations.append(
-            f"Artifact {artifact.artifact_id} source format is unsupported"
+            f"Artifact {artifact.artifact_id} source document cannot be parsed: {exc}"
         )
         return violations
     expected_content = {
@@ -205,6 +305,9 @@ def _content_consistency_violations(
 
 __all__ = [
     "ArtifactInputSnapshot",
+    "SoftwareDeliveryArtifactSpec",
+    "SOFTWARE_DELIVERY_ARTIFACT_ORDER",
     "SOFTWARE_DELIVERY_ARTIFACT_IDS",
+    "SOFTWARE_DELIVERY_ARTIFACT_SPECS",
     "build_artifact_input_snapshot",
 ]

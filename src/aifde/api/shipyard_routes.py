@@ -87,6 +87,7 @@ class GateReviewCreateRequest(_StrictRequest):
     input_snapshot_hash: str = ""
     validator_version: str
     definition_fingerprint: str = ""
+    outcome_attestation: str = ""
     violations: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
