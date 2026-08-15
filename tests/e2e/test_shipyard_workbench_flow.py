@@ -122,17 +122,9 @@ def test_workbench_review_loop_audits_human_return_and_release_manifest(
             workspace.workspace_id,
             artifact_ids,
         )
+        assert all(review.status == "passed" for review in initial_reviews)
         passed_reviews = [
-            service.record_gate_review(
-                review.model_copy(
-                    update={
-                        "gate_run_id": f"{review.gate_id}:passed:1",
-                        "status": "passed",
-                        "stale": False,
-                    }
-                ),
-                system_principal(),
-            )
+            service.record_gate_review(review, system_principal())
             for review in initial_reviews
         ]
         candidate = service.create_release_candidate(

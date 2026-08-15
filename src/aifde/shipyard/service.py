@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from hashlib import sha256
+from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
 from aifde.domain.artifacts import Artifact, canonical_json_bytes
+from aifde.gates.engine import GateEngine
 from aifde.registry.sqlite import SQLiteRegistry
 from aifde.shipyard.contracts import (
     AgentProposal,
@@ -22,6 +24,10 @@ from aifde.shipyard.identity import (
     IdentityProvider,
     Principal,
     UnauthorizedError,
+)
+from aifde.shipyard.provenance import (
+    SOFTWARE_DELIVERY_ARTIFACT_IDS,
+    build_artifact_input_snapshot,
 )
 
 
@@ -39,6 +45,14 @@ class ReleaseBlockedError(RuntimeError):
 
 class RecordNotFoundError(LookupError):
     """A Workbench record or required project-scoped record does not exist."""
+
+
+def _source_root_for_project(project_id: str) -> Path | None:
+    """Return the evaluator-owned source root for checked-in seed projects."""
+
+    if project_id != "software-delivery-demo":
+        return None
+    return Path(__file__).resolve().parents[3] / "projects" / project_id
 
 
 def _utc_now() -> datetime:
@@ -63,6 +77,18 @@ def _ids(value: Iterable[str], field_name: str) -> list[str]:
     if any(not isinstance(item, str) or not item.strip() for item in values):
         raise ValueError(f"{field_name} must contain non-blank strings")
     return list(dict.fromkeys(item.strip() for item in values))
+
+
+def _has_provenance(gate_review: GateReviewSnapshot) -> bool:
+    """Identify the new, strict Gate Review shape without breaking old records."""
+
+    return bool(
+        gate_review.artifact_versions
+        or gate_review.source_snapshot_id
+        or gate_review.source_snapshot_hash
+        or gate_review.input_snapshot_hash
+        or gate_review.definition_fingerprint
+    )
 
 
 class ShipyardApplicationService:
@@ -462,6 +488,14 @@ class ShipyardApplicationService:
         principal = self._require_kind(principal, "system")
         if not isinstance(gate_review, GateReviewSnapshot):
             raise TypeError("gate_review must be a GateReviewSnapshot")
+        try:
+            definition = GateEngine().get_definition(gate_review.gate_id)
+        except KeyError as exc:
+            raise ValueError(f"unknown Gate definition: {gate_review.gate_id}") from exc
+        if gate_review.severity != definition.severity:
+            raise ValueError(
+                f"Gate Review severity does not match Gate definition: {gate_review.gate_id}"
+            )
 
         def operation(transaction: Any) -> GateReviewSnapshot:
             store = transaction.shipyard
@@ -470,6 +504,87 @@ class ShipyardApplicationService:
                 if artifact_id not in workspace.artifact_ids:
                     raise RecordNotFoundError(
                         f"gate review references Artifact outside workspace: {artifact_id}"
+                    )
+            if gate_review.status == "passed" and _has_provenance(gate_review):
+                current_artifacts: list[Artifact] = []
+                for artifact_id in sorted(gate_review.artifact_hashes):
+                    try:
+                        current_artifacts.append(
+                            transaction.artifacts.get(workspace.project_id, artifact_id)
+                        )
+                    except KeyError as exc:
+                        raise ReleaseBlockedError(
+                            f"Gate Review {gate_review.gate_run_id} references an unavailable Artifact"
+                        ) from exc
+                if (
+                    workspace.project_id == "software-delivery-demo"
+                    and set(gate_review.artifact_hashes) != SOFTWARE_DELIVERY_ARTIFACT_IDS
+                ):
+                    raise ReleaseBlockedError(
+                        "software-delivery Gate Review must cover all six seeded Artifacts"
+                    )
+                input_snapshot = build_artifact_input_snapshot(
+                    current_artifacts,
+                    source_root=_source_root_for_project(workspace.project_id),
+                )
+                if input_snapshot.violations:
+                    raise ReleaseBlockedError(
+                        "Gate Review source snapshot is invalid: "
+                        + "; ".join(input_snapshot.violations)
+                    )
+                expected_pipeline_evidence = (
+                    f"pipeline:software-delivery:{workspace.project_id}:sandbox:v1"
+                )
+                if gate_review.artifact_hashes != input_snapshot.artifact_hashes:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {gate_review.gate_run_id} does not reference current Artifact hashes"
+                    )
+                if gate_review.artifact_versions != input_snapshot.artifact_versions:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {gate_review.gate_run_id} does not reference current Artifact versions"
+                    )
+                if gate_review.source_snapshot_id != input_snapshot.source_snapshot_id:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {gate_review.gate_run_id} source snapshot is stale"
+                    )
+                if gate_review.source_snapshot_hash != input_snapshot.source_snapshot_hash:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {gate_review.gate_run_id} source snapshot hash is stale"
+                    )
+                if gate_review.input_snapshot_hash != input_snapshot.input_snapshot_hash:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {gate_review.gate_run_id} input snapshot is stale"
+                    )
+                if gate_review.validator_version != definition.validator_version:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {gate_review.gate_run_id} validator version is not current"
+                    )
+                if gate_review.definition_fingerprint != definition.definition_fingerprint:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {gate_review.gate_run_id} definition fingerprint is not current"
+                    )
+                if not gate_review.evidence_refs:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {gate_review.gate_run_id} has no evidence"
+                    )
+                if not set(input_snapshot.evidence_refs).issubset(gate_review.evidence_refs):
+                    raise ReleaseBlockedError(
+                        f"Gate Review {gate_review.gate_run_id} evidence is not bound to the current input snapshot"
+                    )
+                if (
+                    workspace.project_id == "software-delivery-demo"
+                    and expected_pipeline_evidence not in gate_review.evidence_refs
+                ):
+                    raise ReleaseBlockedError(
+                        f"Gate Review {gate_review.gate_run_id} evidence is not bound to the sandbox evaluator"
+                    )
+                if gate_review.stale:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {gate_review.gate_run_id} is stale"
+                    )
+                if gate_review.violations:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {gate_review.gate_run_id} contains validation violations"
                     )
             store.put_gate_review(gate_review)
             gate_review_ids = [*workspace.gate_review_ids, gate_review.gate_run_id]
@@ -536,6 +651,23 @@ class ShipyardApplicationService:
                     )
                 artifacts[artifact_id] = artifact
 
+            input_snapshot = build_artifact_input_snapshot(
+                list(artifacts.values()),
+                source_root=_source_root_for_project(workspace.project_id),
+            )
+            if input_snapshot.violations:
+                raise ReleaseBlockedError(
+                    "current Artifact source snapshot is invalid: "
+                    + "; ".join(input_snapshot.violations)
+                )
+            if (
+                workspace.project_id == "software-delivery-demo"
+                and set(requested_artifact_ids) != SOFTWARE_DELIVERY_ARTIFACT_IDS
+            ):
+                raise ReleaseBlockedError(
+                    "software-delivery release must cover all six seeded Artifacts"
+                )
+
             reviews = store.list_gate_reviews()
             by_run_id = {review.gate_run_id: review for review in reviews}
             requested_reviews: list[GateReviewSnapshot] = []
@@ -588,6 +720,65 @@ class ShipyardApplicationService:
                 raise ReleaseBlockedError(
                     "missing required gate: " + ", ".join(missing_gate_ids)
                 )
+
+            definitions = GateEngine()
+            expected_evidence_refs = set(input_snapshot.evidence_refs)
+            if workspace.project_id == "software-delivery-demo":
+                expected_evidence_refs.add(
+                    f"pipeline:software-delivery:{workspace.project_id}:sandbox:v1"
+                )
+            for review in requested_reviews:
+                try:
+                    definition = definitions.get_definition(review.gate_id)
+                except KeyError as exc:
+                    raise ReleaseBlockedError(
+                        f"unknown Gate definition: {review.gate_id}"
+                    ) from exc
+                if review.validator_version != definition.validator_version:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {review.gate_run_id} validator version is not current"
+                    )
+                if review.definition_fingerprint != definition.definition_fingerprint:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {review.gate_run_id} definition fingerprint is not current"
+                    )
+                if not review.evidence_refs:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {review.gate_run_id} has no evidence"
+                    )
+                if not expected_evidence_refs.issubset(set(review.evidence_refs)):
+                    raise ReleaseBlockedError(
+                        f"Gate Review {review.gate_run_id} evidence is not bound to the current input snapshot"
+                    )
+                if review.artifact_versions != input_snapshot.artifact_versions:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {review.gate_run_id} does not reference current Artifact versions"
+                    )
+                if review.source_snapshot_id != input_snapshot.source_snapshot_id:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {review.gate_run_id} source snapshot is stale"
+                    )
+                if review.source_snapshot_hash != input_snapshot.source_snapshot_hash:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {review.gate_run_id} source snapshot hash is stale"
+                    )
+                if review.input_snapshot_hash != input_snapshot.input_snapshot_hash:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {review.gate_run_id} input snapshot is stale"
+                    )
+                if workspace.project_id == "software-delivery-demo":
+                    expected_gate_run_id = (
+                        f"snapshot:{workspace.workspace_id}:{review.gate_id}:"
+                        f"{input_snapshot.input_snapshot_hash[:16]}"
+                    )
+                    if review.gate_run_id != expected_gate_run_id:
+                        raise ReleaseBlockedError(
+                            f"Gate Review {review.gate_run_id} is not bound to this evaluator run"
+                        )
+                if review.violations:
+                    raise ReleaseBlockedError(
+                        f"Gate Review {review.gate_run_id} contains validation violations"
+                    )
 
             ordered_artifact_ids = sorted(requested_artifact_ids)
             ordered_gate_run_ids = sorted(requested_gate_run_ids)

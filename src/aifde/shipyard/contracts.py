@@ -233,7 +233,12 @@ class GateReviewSnapshot(_FrozenContract):
     severity: Literal["hard", "soft"]
     status: Literal["pending", "passed", "failed", "blocked"] = "pending"
     artifact_hashes: dict[str, str]
+    artifact_versions: dict[str, str] = Field(default_factory=dict)
+    source_snapshot_id: str = ""
+    source_snapshot_hash: str = ""
+    input_snapshot_hash: str = ""
     validator_version: str
+    definition_fingerprint: str = ""
     violations: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
@@ -250,6 +255,30 @@ class GateReviewSnapshot(_FrozenContract):
     @classmethod
     def normalize_artifact_hashes(cls, value: Any) -> dict[str, str]:
         return _hash_map(value, "artifact_hashes")
+
+    @field_validator("artifact_versions", mode="before")
+    @classmethod
+    def normalize_artifact_versions(cls, value: Any) -> dict[str, str]:
+        if not isinstance(value, Mapping):
+            raise TypeError("artifact_versions must be a mapping")
+        if not value:
+            return {}
+        normalized: dict[str, str] = {}
+        for artifact_id, version in value.items():
+            normalized[_nonblank(artifact_id, "artifact_id")] = _nonblank(
+                version, "artifact_version"
+            )
+        return normalized
+
+    @field_validator("source_snapshot_id")
+    @classmethod
+    def normalize_source_snapshot_id(cls, value: str) -> str:
+        return value if not value else _nonblank(value, "source_snapshot_id")
+
+    @field_validator("source_snapshot_hash", "input_snapshot_hash", "definition_fingerprint")
+    @classmethod
+    def normalize_provenance_hash(cls, value: str, info: Any) -> str:
+        return value if not value else _sha256(value, info.field_name)
 
     @field_validator("violations", "warnings", "evidence_refs", mode="before")
     @classmethod

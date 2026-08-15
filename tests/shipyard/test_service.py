@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from aifde.domain.artifacts import Artifact, canonical_json_bytes
+from aifde.gates.engine import GateEngine
 from aifde.registry.sqlite import SQLiteRegistry
 from aifde.shipyard.contracts import GateReviewSnapshot
 from aifde.shipyard.identity import (
@@ -20,6 +21,7 @@ from aifde.shipyard.service import (
     ShipyardApplicationService,
     StaleRevisionError,
 )
+from aifde.shipyard.provenance import build_artifact_input_snapshot
 
 
 REQUIRED_GATES = frozenset({"semantic.integrity", "release.governance"})
@@ -94,14 +96,22 @@ def passed_gate(
     status: str = "passed",
     stale: bool = False,
 ) -> GateReviewSnapshot:
+    input_snapshot = build_artifact_input_snapshot([artifact])
+    definition = GateEngine().get_definition(gate_id)
     return GateReviewSnapshot(
         gate_run_id=gate_run_id or f"{gate_id}:run-1",
         workspace_id=workspace_id,
         gate_id=gate_id,
         severity="hard",
         status=status,
-        artifact_hashes={artifact.artifact_id: artifact.content_hash},
-        validator_version="validator-1",
+        artifact_hashes=input_snapshot.artifact_hashes,
+        artifact_versions=input_snapshot.artifact_versions,
+        source_snapshot_id=input_snapshot.source_snapshot_id,
+        source_snapshot_hash=input_snapshot.source_snapshot_hash,
+        input_snapshot_hash=input_snapshot.input_snapshot_hash,
+        validator_version=definition.validator_version,
+        definition_fingerprint=definition.definition_fingerprint,
+        evidence_refs=input_snapshot.evidence_refs,
         stale=stale,
         created_at=datetime(2026, 8, 15, 9, 0, tzinfo=UTC),
     )
@@ -349,7 +359,11 @@ def test_release_candidate_rejects_failed_or_stale_gate_reviews(
         for gate_id in REQUIRED_GATES
     ]
     for review in reviews:
-        service.record_gate_review(review, system_principal())
+        if review.status == "passed" and review.stale:
+            with pytest.raises(ReleaseBlockedError, match="stale"):
+                service.record_gate_review(review, system_principal())
+        else:
+            service.record_gate_review(review, system_principal())
 
     with pytest.raises(ReleaseBlockedError):
         service.create_release_candidate(
@@ -434,7 +448,19 @@ def test_release_candidate_is_ready_with_deterministic_manifest(service) -> None
             update={
                 "artifact_hashes": {
                     artifact.artifact_id: artifact.content_hash for artifact in artifacts
-                }
+                },
+                "artifact_versions": {
+                    artifact.artifact_id: artifact.version for artifact in artifacts
+                },
+            }
+        )
+        input_snapshot = build_artifact_input_snapshot(artifacts)
+        review = review.model_copy(
+            update={
+                "source_snapshot_id": input_snapshot.source_snapshot_id,
+                "source_snapshot_hash": input_snapshot.source_snapshot_hash,
+                "input_snapshot_hash": input_snapshot.input_snapshot_hash,
+                "evidence_refs": input_snapshot.evidence_refs,
             }
         )
         service.record_gate_review(review, system_principal())

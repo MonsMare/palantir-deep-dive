@@ -10,9 +10,11 @@ import pytest
 
 from aifde.api.app import create_app
 from aifde.domain.artifacts import Artifact
+from aifde.gates.engine import GateEngine
 from aifde.registry.sqlite import SQLiteRegistry
 from aifde.shipyard.identity import FakeIdentityProvider
 from aifde.shipyard.service import ShipyardApplicationService
+from aifde.shipyard.provenance import build_artifact_input_snapshot
 
 
 pytest.importorskip("fastapi")
@@ -69,16 +71,23 @@ def gate_payload(
     gate_run_id: str | None = None,
     status: str = "passed",
 ) -> dict[str, Any]:
+    input_snapshot = build_artifact_input_snapshot([artifact])
+    definition = GateEngine().get_definition(gate_id)
     return {
         "gate_run_id": gate_run_id or f"{gate_id}:run-1",
         "gate_id": gate_id,
         "severity": "hard",
         "status": status,
-        "artifact_hashes": {artifact.artifact_id: artifact.content_hash},
-        "validator_version": "validator-1",
+        "artifact_hashes": input_snapshot.artifact_hashes,
+        "artifact_versions": input_snapshot.artifact_versions,
+        "source_snapshot_id": input_snapshot.source_snapshot_id,
+        "source_snapshot_hash": input_snapshot.source_snapshot_hash,
+        "input_snapshot_hash": input_snapshot.input_snapshot_hash,
+        "validator_version": definition.validator_version,
+        "definition_fingerprint": definition.definition_fingerprint,
         "violations": [],
         "warnings": [],
-        "evidence_refs": [],
+        "evidence_refs": input_snapshot.evidence_refs,
         "stale": False,
     }
 

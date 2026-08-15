@@ -81,7 +81,12 @@ class GateReviewCreateRequest(_StrictRequest):
     severity: Literal["hard", "soft"]
     status: Literal["pending", "passed", "failed", "blocked"] = "pending"
     artifact_hashes: dict[str, str]
+    artifact_versions: dict[str, str] = Field(default_factory=dict)
+    source_snapshot_id: str = ""
+    source_snapshot_hash: str = ""
+    input_snapshot_hash: str = ""
     validator_version: str
+    definition_fingerprint: str = ""
     violations: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)

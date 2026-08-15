@@ -76,6 +76,14 @@ def test_software_delivery_workbench_blocks_then_allows_release(tmp_path: Path) 
             artifact_ids,
         )
         assert {review.gate_id for review in initial_reviews} == service.required_gate_ids
+        assert all(review.status == "passed" for review in initial_reviews)
+        assert all(review.artifact_versions == {
+            artifact.artifact_id: artifact.version for artifact in artifacts
+        } for review in initial_reviews)
+        assert all(review.source_snapshot_id for review in initial_reviews)
+        assert all(review.source_snapshot_hash for review in initial_reviews)
+        assert all(review.input_snapshot_hash for review in initial_reviews)
+        assert all(review.definition_fingerprint for review in initial_reviews)
         assert all(review.artifact_hashes == {
             artifact.artifact_id: artifact.content_hash for artifact in artifacts
         } for review in initial_reviews)
@@ -83,18 +91,10 @@ def test_software_delivery_workbench_blocks_then_allows_release(tmp_path: Path) 
         assert all(review.evidence_refs for review in initial_reviews)
         assert all(review.stale is False for review in initial_reviews)
 
-        passed_reviews = []
-        for review in initial_reviews:
-            passed = review.model_copy(
-                update={
-                    "gate_run_id": f"{review.gate_id}:passed:1",
-                    "status": "passed",
-                    "stale": False,
-                }
-            )
-            passed_reviews.append(
-                service.record_gate_review(passed, system_principal())
-            )
+        passed_reviews = [
+            service.record_gate_review(review, system_principal())
+            for review in initial_reviews
+        ]
 
         candidate = service.create_release_candidate(
             workspace.workspace_id,
@@ -108,6 +108,194 @@ def test_software_delivery_workbench_blocks_then_allows_release(tmp_path: Path) 
         }
         assert candidate.manifest["gate_run_ids"] == sorted(
             review.gate_run_id for review in passed_reviews
+        )
+    finally:
+        registry.close()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_message"),
+    [
+        ({"validator_version": "obsolete-validator-v0"}, "validator"),
+        ({"definition_fingerprint": "0" * 64}, "definition fingerprint"),
+        ({"evidence_refs": []}, "evidence"),
+        ({"stale": True}, "stale"),
+    ],
+)
+def test_untrusted_gate_claim_cannot_make_release_candidate(
+    tmp_path: Path,
+    mutation: dict[str, object],
+    expected_message: str,
+) -> None:
+    registry, service = build_shipyard_test_runtime(tmp_path)
+    try:
+        workspace = seed_software_delivery_workspace(service, PROJECT_ROOT, "alice")
+        artifacts = seed_software_delivery_artifacts(
+            service, workspace.workspace_id, "alice"
+        )
+        artifact_ids = [artifact.artifact_id for artifact in artifacts]
+        reviews = run_workbench_gate_snapshot(
+            service, workspace.workspace_id, artifact_ids
+        )
+        tampered_reviews = [
+            review.model_copy(update=mutation)
+            if review.gate_id == sorted(service.required_gate_ids)[0]
+            else review
+            for review in reviews
+        ]
+        target_gate_id = sorted(service.required_gate_ids)[0]
+        for review in tampered_reviews:
+            if review.gate_id == target_gate_id:
+                with pytest.raises(ReleaseBlockedError, match=expected_message):
+                    service.record_gate_review(review, system_principal())
+            else:
+                service.record_gate_review(review, system_principal())
+
+        with pytest.raises(ReleaseBlockedError, match="missing Gate Review"):
+            service.create_release_candidate(
+                workspace.workspace_id,
+                artifact_ids,
+                [review.gate_run_id for review in tampered_reviews],
+                human_principal("alice"),
+            )
+    finally:
+        registry.close()
+
+
+def test_registered_artifact_source_mismatch_blocks_snapshot_and_release(
+    tmp_path: Path,
+) -> None:
+    registry, service = build_shipyard_test_runtime(tmp_path)
+    try:
+        workspace = seed_software_delivery_workspace(service, PROJECT_ROOT, "alice")
+        artifacts = seed_software_delivery_artifacts(
+            service, workspace.workspace_id, "alice"
+        )
+        tampered = artifacts[2].model_copy(
+            update={
+                "version": "2.0.0",
+                "metadata": {
+                    **artifacts[2].metadata,
+                    "source_sha256": "0" * 64,
+                },
+            }
+        )
+        service.register_artifact(workspace.workspace_id, tampered, human_principal("alice"))
+        artifact_ids = [artifact.artifact_id for artifact in artifacts]
+
+        blocked_reviews = run_workbench_gate_snapshot(
+            service, workspace.workspace_id, artifact_ids
+        )
+        assert all(review.status == "blocked" for review in blocked_reviews)
+        assert all(review.stale for review in blocked_reviews)
+        assert any("source" in violation for review in blocked_reviews for violation in review.violations)
+
+        for review in blocked_reviews:
+            service.record_gate_review(review, system_principal())
+        promoted_reviews = [
+            review.model_copy(
+                update={
+                    "gate_run_id": f"{review.gate_run_id}:promoted",
+                    "status": "passed",
+                    "stale": False,
+                }
+            )
+            for review in blocked_reviews
+        ]
+        for review in promoted_reviews:
+            with pytest.raises(ReleaseBlockedError, match="source snapshot"):
+                service.record_gate_review(review, system_principal())
+
+        with pytest.raises(ReleaseBlockedError):
+            service.create_release_candidate(
+                workspace.workspace_id,
+                artifact_ids,
+                [review.gate_run_id for review in blocked_reviews],
+                human_principal("alice"),
+            )
+    finally:
+        registry.close()
+
+
+def test_gate_review_run_id_must_bind_to_current_evaluator_input(
+    tmp_path: Path,
+) -> None:
+    registry, service = build_shipyard_test_runtime(tmp_path)
+    try:
+        workspace = seed_software_delivery_workspace(service, PROJECT_ROOT, "alice")
+        artifacts = seed_software_delivery_artifacts(
+            service, workspace.workspace_id, "alice"
+        )
+        artifact_ids = [artifact.artifact_id for artifact in artifacts]
+        reviews = run_workbench_gate_snapshot(
+            service, workspace.workspace_id, artifact_ids
+        )
+        target_gate_id = sorted(service.required_gate_ids)[0]
+        forged_reviews = [
+            review.model_copy(update={"gate_run_id": "forged-gate-run"})
+            if review.gate_id == target_gate_id
+            else review
+            for review in reviews
+        ]
+        for review in forged_reviews:
+            service.record_gate_review(review, system_principal())
+
+        with pytest.raises(ReleaseBlockedError, match="evaluator run"):
+            service.create_release_candidate(
+                workspace.workspace_id,
+                artifact_ids,
+                [review.gate_run_id for review in forged_reviews],
+                human_principal("alice"),
+            )
+    finally:
+        registry.close()
+
+
+def test_gate_snapshot_cannot_switch_to_another_project_root(tmp_path: Path) -> None:
+    registry, service = build_shipyard_test_runtime(tmp_path)
+    try:
+        workspace = seed_software_delivery_workspace(service, PROJECT_ROOT, "alice")
+        artifacts = seed_software_delivery_artifacts(
+            service, workspace.workspace_id, "alice"
+        )
+        reviews = run_workbench_gate_snapshot(
+            service,
+            workspace.workspace_id,
+            [artifact.artifact_id for artifact in artifacts],
+            project_root=tmp_path / "different-project-root",
+        )
+        assert all(review.status == "blocked" for review in reviews)
+        assert all(review.stale for review in reviews)
+        assert any(
+            "source root" in violation
+            for review in reviews
+            for violation in review.violations
+        )
+    finally:
+        registry.close()
+
+
+def test_missing_registered_artifact_produces_blocked_stale_snapshot(
+    tmp_path: Path,
+) -> None:
+    registry, service = build_shipyard_test_runtime(tmp_path)
+    try:
+        workspace = seed_software_delivery_workspace(service, PROJECT_ROOT, "alice")
+        artifacts = seed_software_delivery_artifacts(
+            service, workspace.workspace_id, "alice"
+        )
+        artifact_ids = [artifact.artifact_id for artifact in artifacts]
+        reviews = run_workbench_gate_snapshot(
+            service,
+            workspace.workspace_id,
+            [*artifact_ids, "artifact:software-delivery-demo:missing"],
+        )
+        assert all(review.status == "blocked" for review in reviews)
+        assert all(review.stale for review in reviews)
+        assert any(
+            "six seeded Artifacts" in violation
+            for review in reviews
+            for violation in review.violations
         )
     finally:
         registry.close()

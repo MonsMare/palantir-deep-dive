@@ -16,10 +16,14 @@ from typing import Any, TYPE_CHECKING
 
 import yaml
 
-from aifde.domain.artifacts import Artifact, canonical_json_bytes
+from aifde.domain.artifacts import Artifact
 from aifde.gates.engine import GateEngine
 from aifde.shipyard.contracts import GateReviewSnapshot, ProjectWorkspace
 from aifde.shipyard.identity import Principal, UnauthorizedError
+from aifde.shipyard.provenance import (
+    SOFTWARE_DELIVERY_ARTIFACT_IDS,
+    build_artifact_input_snapshot,
+)
 from aifde.shipyard.service import RecordNotFoundError
 
 if TYPE_CHECKING:
@@ -160,41 +164,85 @@ def run_workbench_gate_snapshot(
         artifact.artifact_id: artifact for artifact in snapshot["artifacts"]
     }
     missing = sorted(set(requested_ids) - set(artifacts_by_id))
-    if missing:
-        raise RecordNotFoundError(
-            "Artifact not found for gate snapshot: " + ", ".join(missing)
-        )
-    artifact_hashes = {
-        artifact_id: artifacts_by_id[artifact_id].content_hash
+    available_ids = [
+        artifact_id
         for artifact_id in sorted(requested_ids)
-    }
-    artifact_digest = sha256(canonical_json_bytes(artifact_hashes)).hexdigest()
-
-    pipeline_root = _project_root(project_root) if project_root is not None else _asset_root()
-    report = _run_sandbox_pipeline(str(pipeline_root))
+        if artifact_id in artifacts_by_id
+    ]
+    # A GateReviewSnapshot must contain at least one real Artifact hash.  If
+    # every requested input is absent, there is no honest snapshot to create;
+    # fail closed rather than manufacturing a hash for an unregistered input.
+    if not available_ids:
+        raise RecordNotFoundError(
+            "cannot create gate snapshot without a registered Artifact: "
+            + ", ".join(missing)
+        )
+    artifacts = [artifacts_by_id[artifact_id] for artifact_id in available_ids]
+    source_root = _asset_root()
+    source_violations: list[str] = []
+    if missing:
+        source_violations.append(
+            "missing registered Artifact(s): " + ", ".join(missing)
+        )
+    if set(requested_ids) != SOFTWARE_DELIVERY_ARTIFACT_IDS:
+        source_violations.append(
+            "software-delivery Gate snapshot must cover all six seeded Artifacts"
+        )
+    if project_root is not None:
+        try:
+            requested_root = _project_root(project_root)
+        except FileNotFoundError:
+            requested_root = None
+            source_violations.append("requested source root does not exist")
+        if requested_root is not None and requested_root != source_root:
+            source_violations.append(
+                "requested source root cannot switch the registered source snapshot"
+            )
+    input_snapshot = build_artifact_input_snapshot(
+        artifacts,
+        source_root=source_root,
+    )
+    source_violations.extend(input_snapshot.violations)
+    if source_violations:
+        report = _SandboxPipelineReport(
+            stage_states={},
+            evidence_refs=["pipeline:software-delivery:source-preflight:blocked"],
+        )
+    else:
+        report = _run_sandbox_pipeline(str(source_root))
     stage_states = report.stage_states
-    evidence_refs = _snapshot_evidence_refs(report.evidence_refs, workspace)
+    evidence_refs = _snapshot_evidence_refs(
+        report.evidence_refs,
+        workspace,
+        input_snapshot.evidence_refs,
+    )
     engine = GateEngine()
     reviews: list[GateReviewSnapshot] = []
     for gate_id in sorted(service.required_gate_ids):
         definition = engine.get_definition(gate_id)
         status, violations = _gate_status(gate_id, stage_states)
+        violations = sorted(set([*source_violations, *violations]))
         reviews.append(
             GateReviewSnapshot(
                 gate_run_id=(
-                    f"snapshot:{workspace_id}:{gate_id}:{artifact_digest[:16]}"
+                    f"snapshot:{workspace_id}:{gate_id}:{input_snapshot.input_snapshot_hash[:16]}"
                 ),
                 revision=1,
                 workspace_id=workspace.workspace_id,
                 gate_id=gate_id,
                 severity=definition.severity,
                 status=status,
-                artifact_hashes=artifact_hashes,
+                artifact_hashes=input_snapshot.artifact_hashes,
+                artifact_versions=input_snapshot.artifact_versions,
+                source_snapshot_id=input_snapshot.source_snapshot_id,
+                source_snapshot_hash=input_snapshot.source_snapshot_hash,
+                input_snapshot_hash=input_snapshot.input_snapshot_hash,
                 validator_version=definition.validator_version,
+                definition_fingerprint=definition.definition_fingerprint,
                 violations=violations,
                 warnings=[],
                 evidence_refs=evidence_refs,
-                stale=False,
+                stale=input_snapshot.stale or bool(source_violations),
                 created_at=GATE_SNAPSHOT_CREATED_AT,
             )
         )
@@ -320,10 +368,15 @@ def _run_sandbox_pipeline(project_root: str):
     return run_demo_pipeline(Path(project_root))
 
 
-def _snapshot_evidence_refs(pipeline_refs: list[str], workspace: ProjectWorkspace) -> list[str]:
+def _snapshot_evidence_refs(
+    pipeline_refs: list[str],
+    workspace: ProjectWorkspace,
+    input_refs: list[str],
+) -> list[str]:
     refs = {
         f"pipeline:software-delivery:{workspace.project_id}:sandbox:v1",
         *pipeline_refs,
+        *input_refs,
     }
     return sorted(refs)
 

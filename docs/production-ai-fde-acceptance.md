@@ -21,7 +21,8 @@ Shipyard 的职责是构建、验证、评测、打包、交付和升级；客�
 Phase 0 的可运行交付物是一个本地、可审计的 Shipyard Workbench review/release-eligibility slice：
 
 - `seed_software_delivery_workspace`、`seed_software_delivery_artifacts` 从仓库内的软件交付资产创建 Workspace 和 typed Artifact；每个 Artifact 保留版本、内容哈希、证据引用、来源哈希、依赖和 `producer="shipyard-seed"`；
-- `run_workbench_gate_snapshot` 在 sandbox 中调用确定性的 `software_delivery_demo.pipeline`，把语义完整性和 release governance 结果转换为带 validator version、Artifact hashes、evidence references、violations 和 stale 状态的 Gate Review snapshot；snapshot 由调用方使用绑定的 system gate-runner 经 Application Service 记录；
+- `run_workbench_gate_snapshot` 在 sandbox 中调用确定性的 `software_delivery_demo.pipeline`，但在 evaluator 之前先校验六类已注册 Artifact 的版本、内容哈希、来源文件 SHA、来源内容和 evidence reference 是否属于同一个固定 source snapshot；结果携带 `source_snapshot_id/hash`、input snapshot hash、Artifact hashes/versions、当前 Gate definition fingerprint、evidence references、violations 和 stale 状态；任何缺失或不一致都生成 blocked/stale（无法构造真实输入时 fail closed），snapshot 由调用方使用绑定的 system gate-runner 经 Application Service 记录；
+- Release eligibility 不信任调用方自报的 passed/stale/validator/evidence：Application Service 会重新读取当前 Artifact 和固定 source snapshot，校验 required gates、当前 validator/definition fingerprint、Artifact 输入版本/哈希、当前 input/source snapshot 及绑定 evidence；旧验证器、空 evidence、输入或证据过期、被伪装成 passed 的 blocked review 都不能生成 ready Candidate；
 - `scripts/shipyard_seed.py` 只创建本地 SQLite Workbench 数据库，演示 Workspace → Decision Case → Artifact → Gate Review 的初始化链路；不会连接 Linear、客户系统或执行生产 Action；
 - Workbench API/UI 可以读取这些 Artifact、Proposal、Gate Review、Audit 和 Release Candidate，并在 required gates 未通过或过期时阻止发布资格；
 - 所有记录写入继续经过 `ShipyardApplicationService`，Agent 只能提交 Proposal，不能审批自身、改变 Gate 或创建 Release Candidate。

@@ -89,7 +89,12 @@ export interface GateReviewSnapshot {
   severity: "hard" | "soft";
   status: "pending" | "passed" | "failed" | "blocked";
   artifact_hashes: Record<string, string>;
+  artifact_versions?: Record<string, string>;
+  source_snapshot_id?: string;
+  source_snapshot_hash?: string;
+  input_snapshot_hash?: string;
   validator_version: string;
+  definition_fingerprint?: string;
   violations: string[];
   warnings: string[];
   evidence_refs: string[];
