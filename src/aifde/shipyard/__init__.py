@@ -9,6 +9,7 @@ from .contracts import (
     ProjectWorkspace,
     ReleaseCandidate,
 )
+from .identity import LocalOwnerIdentityProvider
 
 __all__ = [
     "AgentProposal",
@@ -16,6 +17,7 @@ __all__ = [
     "DecisionCase",
     "GateReviewSnapshot",
     "LocalRuntimeConfig",
+    "LocalOwnerIdentityProvider",
     "ProjectWorkspace",
     "ReleaseCandidate",
     "ShipyardPaths",

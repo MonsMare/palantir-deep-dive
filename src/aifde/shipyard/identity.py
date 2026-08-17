@@ -54,6 +54,55 @@ class IdentityProvider(Protocol):
         """Return the canonical bound Principal or reject the supplied claim."""
 
 
+class LocalOwnerIdentityProvider:
+    """Bind the local Web profile to one explicitly configured human owner."""
+
+    def __init__(
+        self,
+        owner: str,
+        roles: Iterable[str] = ("workspace-owner", "release-owner"),
+    ) -> None:
+        if isinstance(roles, str):
+            raise TypeError("roles must be a collection of strings")
+        self._principal = Principal(
+            subject=owner,
+            kind="human",
+            roles=frozenset(roles),
+        )
+
+    @property
+    def principal(self) -> Principal:
+        return self._principal
+
+    def resolve(self, request_context: Mapping[str, str]) -> Principal:
+        if not isinstance(request_context, Mapping):
+            raise UnauthorizedError("request context is not a mapping")
+
+        subject: object | None = None
+        for key in (
+            "subject",
+            "X-Shipyard-Identity",
+            "x-shipyard-identity",
+        ):
+            if key in request_context:
+                subject = request_context[key]
+                break
+        if not isinstance(subject, str) or not subject.strip():
+            raise UnauthorizedError("request context does not contain an identity")
+        if subject.strip() != self._principal.subject:
+            raise UnauthorizedError(f"unknown local identity: {subject.strip()}")
+        return self._principal
+
+    def verify(self, principal: Principal) -> Principal:
+        if not isinstance(principal, Principal):
+            raise UnauthorizedError("operation requires a Principal")
+        if principal != self._principal:
+            raise UnauthorizedError(
+                f"identity claim does not match local owner {self._principal.subject}"
+            )
+        return self._principal
+
+
 class FakeIdentityProvider:
     """Explicit in-memory identity directory for local and test use only."""
 
@@ -115,6 +164,7 @@ class FakeIdentityProvider:
 __all__ = [
     "FakeIdentityProvider",
     "IdentityProvider",
+    "LocalOwnerIdentityProvider",
     "Principal",
     "PrincipalKind",
     "UnauthorizedError",
