@@ -50,6 +50,11 @@ export interface ShipyardApi {
   ) => Promise<ReleaseCandidate>;
 }
 
+export interface ShipyardApiClientOptions {
+  apiBaseUrl?: string;
+  identity?: string;
+}
+
 export class ShipyardApiError extends Error {
   readonly status: number;
 
@@ -59,14 +64,6 @@ export class ShipyardApiError extends Error {
     this.status = status;
   }
 }
-
-const apiBaseUrl = (import.meta.env.VITE_SHIPYARD_API_URL ?? "").replace(
-  /\/+$/,
-  "",
-);
-const identity = import.meta.env.VITE_SHIPYARD_IDENTITY ?? "";
-
-const pathFor = (path: string): string => `${apiBaseUrl}${path}`;
 
 const errorMessageFrom = (body: unknown, status: number): string => {
   if (typeof body === "object" && body !== null && "detail" in body) {
@@ -79,6 +76,18 @@ const errorMessageFrom = (body: unknown, status: number): string => {
 };
 
 export class ShipyardApiClient implements ShipyardApi {
+  private readonly apiBaseUrl: string;
+
+  private readonly identity: string;
+
+  constructor(options: ShipyardApiClientOptions = {}) {
+    this.apiBaseUrl = (
+      options.apiBaseUrl ?? import.meta.env.VITE_SHIPYARD_API_URL ?? ""
+    ).replace(/\/+$/, "");
+    this.identity =
+      options.identity ?? import.meta.env.VITE_SHIPYARD_IDENTITY ?? "";
+  }
+
   async listWorkspaces(): Promise<ProjectWorkspace[]> {
     return this.request<ProjectWorkspace[]>("/workspaces");
   }
@@ -129,12 +138,16 @@ export class ShipyardApiClient implements ShipyardApi {
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    if (!this.identity.trim()) {
+      throw new Error("Shipyard runtime identity is required");
+    }
+
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");
     headers.set("Content-Type", "application/json");
-    headers.set("X-Shipyard-Identity", identity);
+    headers.set("X-Shipyard-Identity", this.identity);
 
-    const response = await fetch(pathFor(path), {
+    const response = await fetch(`${this.apiBaseUrl}${path}`, {
       ...init,
       headers,
     });
