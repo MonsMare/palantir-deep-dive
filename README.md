@@ -26,6 +26,26 @@ Shipyard 可以在沙箱和历史回放中运行目标系统的副本，用来�
 
 设计主线从 [AI-FDE Shipyard Workbench 设计](docs/superpowers/specs/2026-08-15-ai-fde-shipyard-workbench-design.md) 开始。Workbench 是当前人机协作界面；Linear、客户生产运行时和复杂多租户部署均属于后续边界，不是当前核心构建目标。
 
+## Local Web Runtime
+
+当前 L0 版本提供浏览器优先的本地 Shipyard Workbench。它是构建、评测、门禁和发布候选控制面，不是客户生产预测或决策运行时。
+
+在仓库根目录执行：
+
+~~~powershell
+python -m pip install -e ".[web]"
+Set-Location workbench
+npm ci
+npm run build
+Set-Location ..
+shipyard init . --owner alice
+shipyard web --project .
+~~~
+
+默认地址是 http://127.0.0.1:3080。.shipyard/ 是本地状态目录，Workbench 的 workbench/dist/ 是构建生成物，两者都不会进入版本控制。如果 Workbench 资源不存在，先在 workbench 目录运行 npm run build。
+
+现有 scripts/shipyard_seed.py 只初始化演示数据库，不启动 Web。Local Web 不连接客户系统，也不执行生产 Action；headless、团队内网、Docker 和客户侧运行时属于后续部署边界。
+
 从测试开始：
 
 ```powershell
