@@ -1,5 +1,6 @@
 """Shipyard Workbench domain contracts."""
 
+from .config import LocalRuntimeConfig, ShipyardPaths, write_default_config
 from .contracts import (
     AgentProposal,
     AuditEvent,
@@ -14,6 +15,9 @@ __all__ = [
     "AuditEvent",
     "DecisionCase",
     "GateReviewSnapshot",
+    "LocalRuntimeConfig",
     "ProjectWorkspace",
     "ReleaseCandidate",
+    "ShipyardPaths",
+    "write_default_config",
 ]
