@@ -16,6 +16,23 @@ Shipyard Workbench
 
 Shipyard 的职责是构建、验证、评测、打包、交付和升级；客户生产运行时的职责是接收实时或批量数据、产生预测和决策、执行已经授权的业务动作。两者使用发布包和反馈协议连接，不能由同一个 Agent 进程混合承担。
 
+## 0. Phase 0 已交付：软件交付垂直切片
+
+Phase 0 的可运行交付物是一个本地、可审计的 Shipyard Workbench review/release-eligibility slice：
+
+- `seed_software_delivery_workspace`、`seed_software_delivery_artifacts` 从仓库内的软件交付资产创建 Workspace 和 typed Artifact；每个 Artifact 保留版本、内容哈希、证据引用、来源哈希、依赖和 `producer="shipyard-seed"`；
+- `run_workbench_gate_snapshot` 使用 evaluator 固定的六个 Artifact ID → source asset/kind/format 映射，不接受 Artifact 自报的 `source_path` 作为权威；evaluator 从 Registry 读取每个已注册 Artifact 的 canonical content，同时读取对应 source asset，做内容/hash 一致性和类型结构语义校验。每个 Artifact 都会生成输入 digest、semantic result 和 evidence reference；任何缺失、错配、未参与评测或语义错误都生成 blocked/stale，sandbox pipeline 只能作为额外检查；
+- snapshot 还携带 `source_snapshot_id/hash`、input snapshot hash、Artifact hashes/versions、当前 Gate definition fingerprint、evidence references、violations 和 stale 状态，以及覆盖 gate/run/status/stale/violations/Artifact-input-source hash/validator/fingerprint/evidence/stage states 的 `outcome_attestation`；无法构造真实评测输入或 sandbox 没有 stage state 时 fail closed，不能把 blocked 结果复制成 passed；snapshot 由调用方使用绑定的 system gate-runner 经 Application Service 记录；
+- Release eligibility 不信任调用方自报的 passed/stale/validator/evidence：Application Service 会重新读取当前 Artifact 和固定 source snapshot，校验 required gates、当前 validator/definition fingerprint、Artifact 输入版本/哈希、当前 input/source snapshot 及绑定 evidence；旧验证器、空 evidence、输入或证据过期、被伪装成 passed 的 blocked review 都不能生成 ready Candidate；
+- 对完整 provenance 的软件交付 Gate Review，Application Service 会用同一受治理 deterministic evaluator 重建 outcome，并逐字段验证 `outcome_attestation`；修改 status、violations、stale、gate_run_id、输入/来源 hash、evidence 或 validator/fingerprint 的 review 都不能写入或取得 release eligibility。旧 Task 1–5 的兼容性 GateReview 形状仍可写入，但不获得本切片的 release eligibility；
+- `scripts/shipyard_seed.py` 只创建本地 SQLite Workbench 数据库，演示 Workspace → Decision Case → Artifact → Gate Review 的初始化链路；不会连接 Linear、客户系统或执行生产 Action；
+- Workbench API/UI 可以读取这些 Artifact、Proposal、Gate Review、Audit 和 Release Candidate，并在 required gates 未通过或过期时阻止发布资格；
+- 所有记录写入继续经过 `ShipyardApplicationService`，Agent 只能提交 Proposal，不能审批自身、改变 Gate 或创建 Release Candidate。
+- Phase 0 使用 owner-only 的 workspace 资源授权：已验证 human 只能读取自己拥有的 Workspace；创建 Decision Case、登记 Artifact、决定 Proposal 需要实际 `workspace.owner` 与 `workspace-owner` role，创建 Release Candidate 需要 owner 与 `release-owner` role。API 的 GET 也把已验证 Principal 传入 Service；成员 ACL 后续再扩展；
+- `agent` 且具备 `builder` role 的内部身份只能提交 Agent Proposal，`system` 且具备 `gate-runner` role 的内部身份只能记录 Gate Review；二者不是 human workspace owner。bootstrap/evaluator 的读取走明确的 private/internal Service helper，不提供无 Principal 的公开读取绕过。
+
+这一阶段明确不交付：客户生产 runtime、完整 ML Evaluation Lab、生产级 ERP/Jira/身份/消息 connector、Docker/高可用部署、自动执行客户 Action，以及 Linear 人机协作适配器。Phase 0 证明的是“可以在 Shipyard 中审阅并判断一个候选系统是否具备 release eligibility”，不是“已经把系统部署到客户侧持续预测和决策”。
+
 ## 2. 当前已具备的构建内核
 
 ### 2.1 证据与 Ontology Builder
@@ -42,7 +59,14 @@ Shipyard 的职责是构建、验证、评测、打包、交付和升级；客�
 - Artifact Workspace 追加写入，冲突、stale 输入、预算耗尽和验证失败都会显式阻断；
 - Gate、Approval、Audit、版本和输入哈希组成可追溯的构建记录。
 
-### 2.4 目标系统的沙箱验证
+### 2.4 Phase 0 vertical-slice 适配器
+
+- `src/aifde/shipyard/bootstrap.py` 是构建侧适配器，不是客户运行时；
+- seed 资产只来自 `projects/software-delivery-demo` 中的配置、决策、Ontology、数据产品、特征和模型策略文件；
+- 缺少本地 demo pipeline 的可选评测依赖或没有可验证 stage state 时，Gate snapshot 会保持 `blocked/stale`，不会把“无法评测”伪装成通过；
+- `software_delivery_demo.pipeline` 中的 Action 仍是本地 Mock/sandbox 行为，不代表已连接或写入任何客户生产系统。
+
+### 2.5 目标系统的沙箱验证
 
 `supplier-delay` 和 `software-delivery` 领域包可以在本地沙箱中验证：
 
@@ -98,6 +122,14 @@ git diff --check
 
 ```powershell
 pytest tests/builder tests/ml tests/optimization tests/gates tests/agents tests/e2e -q
+```
+
+Phase 0 垂直切片的针对性验收：
+
+```powershell
+pytest tests/shipyard/test_software_delivery_slice.py tests/e2e/test_shipyard_workbench_flow.py -q
+pytest tests/shipyard tests/api tests/e2e -q
+python scripts/shipyard_seed.py --database .tmp/shipyard.db --owner alice
 ```
 
 ## 6. 下一步交付顺序
