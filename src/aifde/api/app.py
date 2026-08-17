@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
+from aifde.deployment.health import ReadinessReport
 from aifde.policy.capabilities import PolicyEngine
+from aifde.shipyard.config import LocalRuntimeConfig
 from aifde.shipyard.service import ShipyardApplicationService
 
 try:
@@ -53,4 +57,31 @@ def create_app(
 
         app.state.shipyard_service = shipyard_service
         app.include_router(build_shipyard_router(shipyard_service))
+    return app
+
+
+def create_shipyard_app(
+    *,
+    shipyard_service: ShipyardApplicationService,
+    runtime_config: LocalRuntimeConfig,
+    frontend_dir: Path,
+    readiness: Callable[[], ReadinessReport],
+) -> Any:
+    """Build the Local Web Runtime without legacy stage/action routes."""
+
+    if FastAPI is None:  # pragma: no cover - dependency is present in API test env
+        raise RuntimeError(
+            "FastAPI is required for the AI-FDE Shipyard Web Runtime; "
+            'install the "web" extra'
+        )
+
+    from .runtime_routes import build_runtime_router
+    from .shipyard_routes import build_router as build_shipyard_router
+    from .static import mount_workbench
+
+    app = FastAPI(title="AI-FDE Shipyard Workbench")
+    app.state.shipyard_service = shipyard_service
+    app.include_router(build_runtime_router(runtime_config, readiness))
+    app.include_router(build_shipyard_router(shipyard_service))
+    mount_workbench(app, frontend_dir)
     return app
