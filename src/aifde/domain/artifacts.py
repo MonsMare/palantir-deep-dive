@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 import hashlib
 import json
 import re
@@ -21,6 +22,10 @@ from pydantic import (
 
 
 _SEMANTIC_VERSION_PATTERN = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def normalize_semantic_version(version: str | int) -> str:
@@ -77,12 +82,33 @@ class Artifact(BaseModel):
     depends_on: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    parent_artifact_ids: list[str] = Field(default_factory=list)
+    producer: str | None = None
+    created_at: datetime = Field(default_factory=_utc_now)
+    validation_results: list[JsonValue] = Field(default_factory=list)
 
     @computed_field
     @property
     def content_hash(self) -> str:
         """Derive the hash from current content so it cannot become stale."""
         return content_hash_for(self.content)
+
+    def __eq__(self, other: object) -> bool:
+        """Compare legacy SQLite records without treating their synthesized time as data."""
+        if not isinstance(other, Artifact):
+            return NotImplemented
+
+        comparable_fields = {"content_hash", "created_at"}
+        left = self.model_dump(mode="python", exclude=comparable_fields)
+        right = other.model_dump(mode="python", exclude=comparable_fields)
+        if left != right:
+            return False
+
+        left_has_explicit_time = "created_at" in self.__pydantic_fields_set__
+        right_has_explicit_time = "created_at" in other.__pydantic_fields_set__
+        if left_has_explicit_time and right_has_explicit_time:
+            return self.created_at == other.created_at
+        return True
 
     def model_copy(
         self, *, update: Mapping[str, Any] | None = None, deep: bool = False
@@ -126,6 +152,27 @@ class Artifact(BaseModel):
             raise ValueError("must not be empty")
         return value
 
+    @field_validator("parent_artifact_ids")
+    @classmethod
+    def reject_blank_parent_artifact_ids(cls, value: list[str]) -> list[str]:
+        if any(not isinstance(item, str) or not item.strip() for item in value):
+            raise ValueError("parent_artifact_ids must contain non-empty strings")
+        return list(value)
+
+    @field_validator("producer")
+    @classmethod
+    def reject_blank_producer(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("producer must not be empty")
+        return value
+
+    @field_validator("created_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("created_at must be timezone-aware")
+        return value.astimezone(timezone.utc)
+
     @field_validator("version", mode="before")
     @classmethod
     def normalize_semantic_version(cls, value: Any) -> str:
@@ -146,17 +193,29 @@ class Artifact(BaseModel):
         depends_on: list[str] | None = None,
         evidence_refs: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        parent_artifact_ids: list[str] | None = None,
+        producer: str | None = None,
+        created_at: datetime | None = None,
+        validation_results: list[JsonValue] | None = None,
     ) -> Artifact:
         """Build an artifact with a deterministic SHA-256 content hash."""
-        return cls(
-            artifact_id=artifact_id if artifact_id is not None else str(uuid4()),
-            project_id=project_id,
-            kind=kind,
-            version=version,
-            status=status,
-            owner=owner,
-            content=content,
-            depends_on=depends_on or [],
-            evidence_refs=evidence_refs or [],
-            metadata=metadata or {},
-        )
+        values: dict[str, Any] = {
+            "artifact_id": artifact_id if artifact_id is not None else str(uuid4()),
+            "project_id": project_id,
+            "kind": kind,
+            "version": version,
+            "status": status,
+            "owner": owner,
+            "content": content,
+            "depends_on": depends_on or [],
+            "evidence_refs": evidence_refs or [],
+            "metadata": metadata or {},
+            "created_at": created_at if created_at is not None else _utc_now(),
+        }
+        if parent_artifact_ids is not None:
+            values["parent_artifact_ids"] = parent_artifact_ids
+        if producer is not None:
+            values["producer"] = producer
+        if validation_results is not None:
+            values["validation_results"] = validation_results
+        return cls(**values)

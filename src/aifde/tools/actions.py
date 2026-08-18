@@ -17,6 +17,12 @@ from aifde.domain.actions import (
     ActionValidation,
     ExternalReceipt,
 )
+from aifde.ontology.computation import (
+    ActionOutcomeLink,
+    ComputationChainValidator,
+    FeatureSnapshot,
+    GovernedActionRequest,
+)
 from aifde.policy.capabilities import (
     ApprovedActionRecord,
     ApprovalVerifier,
@@ -26,6 +32,11 @@ from aifde.policy.capabilities import (
 )
 from aifde.policy.gateway import ToolGateway
 from aifde.tools.protocol import ToolResult
+from aifde.actions.adapters import (
+    AdapterReceipt,
+    GovernedActionBroker,
+    MemoryActionAdapter,
+)
 
 
 class ActionPolicy(BaseModel):
@@ -378,6 +389,52 @@ class ActionBroker:
             self._record("failure", request, request_id, actor, "mock Action failed")
         return stored.model_copy(deep=True)
 
+    def execute_governed(
+        self,
+        request: GovernedActionRequest,
+        snapshot: FeatureSnapshot,
+        *,
+        actor: str,
+        decision: Any,
+        predictions: Iterable[Any] = (),
+        audit_ref: str = "computation-chain-audit",
+        audit_actor: str = "computation-chain-validator",
+    ) -> tuple[ActionOutcome, ActionOutcomeLink]:
+        """Execute only after the computation chain and legacy broker agree.
+
+        This adapter deliberately keeps the existing broker as the authority
+        boundary.  The new immutable request is validated first, adapted to
+        the legacy mock request, executed through the protected approval path,
+        and returned with a typed outcome link.
+        """
+
+        if not isinstance(request, GovernedActionRequest):
+            raise TypeError("request must be a GovernedActionRequest")
+        if not isinstance(snapshot, FeatureSnapshot):
+            raise TypeError("snapshot must be a FeatureSnapshot")
+        artifacts = [*predictions, decision, request]
+        ComputationChainValidator.validate(snapshot, *artifacts)
+        legacy_request = request.to_legacy_action_request(
+            audit_ref=audit_ref,
+            audit_actor=audit_actor,
+        )
+        outcome = self.execute(legacy_request, actor=actor)
+        linked = ActionOutcomeLink(
+            outcome_id=f"outcome-link:{outcome.outcome_id}",
+            action_id=request.action_id,
+            decision_id=request.decision_id,
+            target_id=request.target_id,
+            status=outcome.status,
+            external_ref=outcome.external_ref,
+            executed_at=outcome.executed_at,
+            ontology_release_id=request.ontology_release_id,
+            ontology_version=request.ontology_version,
+            prediction_ids=request.prediction_ids,
+            feature_snapshot_id=request.feature_snapshot_id,
+            lineage_refs=(*request.lineage_refs, f"urn:aifde:legacy-outcome:{outcome.outcome_id}"),
+        )
+        return outcome, linked
+
     def get_outcome(self, action_id: str) -> ActionOutcome:
         """Return an outcome copy; absence is deliberately explicit."""
 
@@ -463,8 +520,11 @@ def _receipt_from_tool_result(result: ToolResult) -> ExternalReceipt:
 
 
 __all__ = [
+    "AdapterReceipt",
     "ActionAuditRecord",
     "ActionBroker",
     "ActionPolicy",
+    "GovernedActionBroker",
+    "MemoryActionAdapter",
     "MockActionAdapter",
 ]

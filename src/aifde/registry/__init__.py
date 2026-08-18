@@ -1,4 +1,4 @@
-"""Immutable persistence adapters for AI FDE domain records."""
+"""Immutable persistence adapters for Shipyard domain records."""
 
 from .sqlite import SQLiteRegistry
 

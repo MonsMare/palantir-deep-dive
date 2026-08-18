@@ -1,0 +1,1161 @@
+"""Evidence-bound semantic candidates for the ontology builder.
+
+This module deliberately stops at typed candidates.  It does not publish
+business facts or silently merge source identities.  Deterministic extraction
+is used by the local demo, while ``CandidateProvider`` keeps the boundary
+replaceable for a future LLM proposal adapter.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
+from hashlib import sha256
+import json
+from math import isfinite
+import re
+from typing import Any, Literal, Protocol, Self
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .contracts import EvidenceFragment
+
+
+AssertionType = Literal["fact", "definition", "rule", "assumption", "inference"]
+CandidateStatus = Literal["proposed", "accepted", "rejected", "deprecated"]
+MatchStatus = Literal["confirmed", "probable_match", "unresolved", "rejected"]
+ReleaseStatus = Literal["eligible", "unreleased", "blocked"]
+ReleaseEligibility = Literal["review_required", "blocked", "eligible"]
+
+
+class _ImmutableList(list[Any]):
+    def _immutable(self, *_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("immutable semantic assertion value")
+
+    __setitem__ = __delitem__ = append = clear = extend = insert = pop = remove = reverse = sort = _immutable
+    __iadd__ = __imul__ = _immutable
+
+
+class _ImmutableDict(dict[str, Any]):
+    def _immutable(self, *_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("immutable semantic assertion value")
+
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = _immutable
+
+
+def _immutable_json(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ValueError("assertion values must contain finite numbers")
+        return value
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("assertion value mapping keys must be strings")
+        return _ImmutableDict({key: _immutable_json(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return _ImmutableList(_immutable_json(item) for item in value)
+    raise TypeError("assertion values must be JSON-compatible")
+
+
+def _nonblank(value: str, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must not be empty")
+    return value.strip()
+
+
+def _stable_id(prefix: str, *parts: str) -> str:
+    payload = "\x00".join(parts).encode("utf-8")
+    return f"{prefix}:{sha256(payload).hexdigest()[:16]}"
+
+
+def _normalize_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def _semantic_tokens(value: Any) -> set[str]:
+    """Return comparison tokens while retaining compact identifiers."""
+
+    text = str(value)
+    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
+    return {token for token in re.split(r"[^a-zA-Z0-9]+", text.lower()) if token}
+
+
+def _compact_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+_GENERIC_ASSERTION_TOKENS = frozenset(
+    {
+        "actual",
+        "assertion",
+        "date",
+        "delivery",
+        "display",
+        "event",
+        "fact",
+        "name",
+        "of",
+        "order",
+        "po",
+        "promised",
+        "purchase",
+        "revision",
+        "source",
+        "supplier",
+        "the",
+        "to",
+        "unknown",
+        "variant",
+    }
+)
+
+
+class _RevalidatingFrozenModel(BaseModel):
+    """Frozen candidate model whose copies cannot bypass validators."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        values = self.model_dump(mode="python")
+        if deep:
+            values = deepcopy(values)
+        if update:
+            values.update(dict(update))
+        return type(self).model_validate(values)
+
+
+class BuilderContext(_RevalidatingFrozenModel):
+    """Immutable context that constrains one candidate-building run."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    project_id: str
+    domain: str
+    ontology_version: str
+    known_terms: tuple[str, ...] = ()
+
+    @field_validator("project_id", "domain", "ontology_version")
+    @classmethod
+    def validate_identity(cls, value: str, info: Any) -> str:
+        return _nonblank(value, info.field_name)
+
+    @field_validator("known_terms")
+    @classmethod
+    def validate_terms(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(_nonblank(item, "known_terms item") for item in value)
+
+    @property
+    def digest(self) -> str:
+        payload = json.dumps(
+            {
+                "project_id": self.project_id,
+                "domain": self.domain,
+                "ontology_version": self.ontology_version,
+                "known_terms": self.known_terms,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return sha256(payload).hexdigest()
+
+
+class _ContextBindingAuthority:
+    """Issue a process-local proof that a builder context was actually issued.
+
+    A digest alone is only an equality check: a caller can calculate or copy
+    an arbitrary digest and put it on a proposal.  The builder therefore also
+    receives an opaque issuer binding token.  The compiler verifies the token
+    against this private issuer registry.  A production deployment should
+    replace this in-memory authority with a signed, durable context manifest;
+    the important boundary is that the compiler does not trust a caller-made
+    digest string as proof of Builder execution.
+    """
+
+    _bindings: dict[str, str] = {}
+
+    @classmethod
+    def issue(cls, context_digest: str, proposal_values: Mapping[str, Any]) -> str:
+        fingerprint = cls._fingerprint(context_digest, proposal_values)
+        token = sha256(f"aifde-builder-binding:{fingerprint}".encode("utf-8")).hexdigest()
+        cls._bindings[token] = fingerprint
+        return token
+
+    @classmethod
+    def verify(
+        cls,
+        token: str | None,
+        context_digest: str | None,
+        proposal_values: Mapping[str, Any],
+    ) -> bool:
+        if not token or not context_digest:
+            return False
+        return cls._bindings.get(token) == cls._fingerprint(context_digest, proposal_values)
+
+    @staticmethod
+    def _fingerprint(context_digest: str, proposal_values: Mapping[str, Any]) -> str:
+        values = _normalize_binding_value(deepcopy(dict(proposal_values)))
+        values["context_binding"] = None
+        payload = json.dumps(
+            {"context_digest": context_digest, "proposal": values},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _normalize_binding_value(value: Any) -> Any:
+    if isinstance(value, BaseModel):
+        return _normalize_binding_value(value.model_dump(mode="json"))
+    if isinstance(value, Mapping):
+        return {str(key): _normalize_binding_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_normalize_binding_value(item) for item in value]
+    if hasattr(value, "value") and not isinstance(value, (str, bytes, int, float, bool)):
+        return _normalize_binding_value(value.value)
+    return value
+
+
+class TermCandidate(_RevalidatingFrozenModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    term_id: str
+    surface_forms: tuple[str, ...]
+    canonical_label: str
+    definition_candidate: str | None = None
+    source_evidence_refs: tuple[str, ...] = ()
+    conflicting_definitions: tuple[str, ...] = ()
+    status: CandidateStatus = "proposed"
+    candidate_version: str = "unversioned"
+    context_digest: str | None = None
+
+    @field_validator("term_id", "canonical_label")
+    @classmethod
+    def validate_identity(cls, value: str, info: Any) -> str:
+        return _nonblank(value, info.field_name)
+
+    @field_validator("candidate_version")
+    @classmethod
+    def validate_candidate_version(cls, value: str) -> str:
+        return _nonblank(value, "candidate_version")
+
+    @field_validator("context_digest")
+    @classmethod
+    def validate_context_digest(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = _nonblank(value, "context_digest")
+        if not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("context_digest must be a lowercase SHA-256 hex digest")
+        return value
+
+    @field_validator("surface_forms")
+    @classmethod
+    def validate_surface_forms(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value or any(not item.strip() for item in value):
+            raise ValueError("surface_forms must contain non-empty values")
+        return tuple(dict.fromkeys(item.strip() for item in value))
+
+
+class EntityCandidate(_RevalidatingFrozenModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    candidate_id: str
+    entity_type: str
+    name: str
+    external_key: str | None = None
+    source_evidence_refs: tuple[str, ...] = ()
+    identity_features: tuple[str, ...] = ()
+    conflict_refs: tuple[str, ...] = ()
+    resolution_status: Literal["unresolved", "probable_match", "confirmed", "rejected"] = "unresolved"
+    candidate_version: str = "unversioned"
+    context_digest: str | None = None
+
+    @field_validator("candidate_id", "entity_type", "name")
+    @classmethod
+    def validate_identity(cls, value: str, info: Any) -> str:
+        return _nonblank(value, info.field_name)
+
+    @field_validator("candidate_version")
+    @classmethod
+    def validate_candidate_version(cls, value: str) -> str:
+        return _nonblank(value, "candidate_version")
+
+    @field_validator("context_digest")
+    @classmethod
+    def validate_context_digest(cls, value: str | None) -> str | None:
+        return None if value is None else _nonblank(value, "context_digest")
+
+
+class EntityMatch(_RevalidatingFrozenModel):
+    """A replayable identity-resolution decision, not an implicit merge."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    candidate_id: str
+    canonical_entity_id: str | None = None
+    score: float = Field(ge=0.0, le=1.0)
+    threshold: float = Field(ge=0.0, le=1.0)
+    matching_fields: tuple[str, ...] = ()
+    algorithm_version: str
+    conflict_refs: tuple[str, ...] = ()
+    status: MatchStatus = "unresolved"
+    candidate_version: str = "unversioned"
+    context_digest: str | None = None
+
+    @field_validator("candidate_id", "algorithm_version")
+    @classmethod
+    def validate_identity(cls, value: str, info: Any) -> str:
+        return _nonblank(value, info.field_name)
+
+    @field_validator("candidate_version")
+    @classmethod
+    def validate_candidate_version(cls, value: str) -> str:
+        return _nonblank(value, "candidate_version")
+
+    @field_validator("context_digest")
+    @classmethod
+    def validate_context_digest(cls, value: str | None) -> str | None:
+        return None if value is None else _nonblank(value, "context_digest")
+
+    @model_validator(mode="after")
+    def validate_match_state(self) -> Self:
+        if self.status in {"confirmed", "probable_match"} and not self.canonical_entity_id:
+            raise ValueError("resolved matches require canonical_entity_id")
+        if self.status == "probable_match" and self.score < self.threshold:
+            raise ValueError("probable_match score must meet threshold")
+        return self
+
+
+class SemanticAssertion(_RevalidatingFrozenModel):
+    """A typed semantic claim with explicit epistemic status."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    assertion_id: str
+    assertion_type: AssertionType
+    subject: str
+    predicate: str
+    value: Any
+    evidence_refs: tuple[str, ...] = ()
+    reviewer_owner: str | None = None
+    expression: str | None = None
+    candidate_version: str = "unversioned"
+    context_digest: str | None = None
+    release_status: ReleaseStatus = "eligible"
+
+    @field_validator("assertion_id", "subject", "predicate")
+    @classmethod
+    def validate_identity(cls, value: str, info: Any) -> str:
+        return _nonblank(value, info.field_name)
+
+    @field_validator("candidate_version")
+    @classmethod
+    def validate_candidate_version(cls, value: str) -> str:
+        return _nonblank(value, "candidate_version")
+
+    @field_validator("context_digest")
+    @classmethod
+    def validate_assertion_context_digest(cls, value: str | None) -> str | None:
+        return None if value is None else _nonblank(value, "context_digest")
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def freeze_value(cls, value: Any) -> Any:
+        return _immutable_json(value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_unreleased_status(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping) or data.get("assertion_type") not in {
+            "assumption",
+            "inference",
+        }:
+            return data
+        normalized = dict(data)
+        if normalized.get("release_status", "unreleased") == "eligible":
+            raise ValueError("assumptions and inferences must remain unreleased or blocked")
+        normalized.setdefault("release_status", "unreleased")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_epistemic_fields(self) -> Self:
+        if self.assertion_type == "definition" and not self.reviewer_owner:
+            raise ValueError("definition assertions require reviewer_owner")
+        if self.assertion_type == "rule" and not self.expression:
+            raise ValueError("rule assertions require executable expression")
+        if self.assertion_type in {"assumption", "inference"} and self.release_status == "eligible":
+            raise ValueError("assumptions and inferences must remain unreleased or blocked")
+        return self
+
+
+class MappingCandidate(_RevalidatingFrozenModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mapping_id: str
+    source_evidence_refs: tuple[str, ...]
+    source_field_path: str
+    target_product: str
+    target_grain: str
+    target_field: str
+    transform_expression: str = "identity"
+    identity_rule: str
+    time_semantics: str
+    null_policy: str = "preserve"
+    candidate_version: str = "unversioned"
+    context_digest: str | None = None
+
+    @field_validator(
+        "mapping_id",
+        "source_field_path",
+        "target_product",
+        "target_grain",
+        "target_field",
+        "identity_rule",
+        "time_semantics",
+        "null_policy",
+    )
+    @classmethod
+    def validate_text(cls, value: str, info: Any) -> str:
+        return _nonblank(value, info.field_name)
+
+    @field_validator("candidate_version")
+    @classmethod
+    def validate_candidate_version(cls, value: str) -> str:
+        return _nonblank(value, "candidate_version")
+
+    @field_validator("context_digest")
+    @classmethod
+    def validate_mapping_context_digest(cls, value: str | None) -> str | None:
+        return None if value is None else _nonblank(value, "context_digest")
+
+    @field_validator("source_evidence_refs")
+    @classmethod
+    def validate_evidence(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value or any(not item.strip() for item in value):
+            raise ValueError("mapping candidates require source evidence")
+        return tuple(dict.fromkeys(value))
+
+
+class CandidateProposal(_RevalidatingFrozenModel):
+    """The complete immutable proposal produced before review and compilation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    terms: tuple[TermCandidate, ...] = ()
+    entities: tuple[EntityCandidate, ...] = ()
+    entity_matches: tuple[EntityMatch, ...] = ()
+    assertions: tuple[SemanticAssertion, ...] = ()
+    mappings: tuple[MappingCandidate, ...] = ()
+    warnings: tuple[str, ...] = ()
+    evidence_refs: tuple[str, ...] = ()
+    proposal_version: str = "semantic-candidate-v1"
+    context_digest: str | None = None
+    context_binding: str | None = None
+    release_eligibility: ReleaseEligibility = "review_required"
+
+    @field_validator("proposal_version")
+    @classmethod
+    def validate_proposal_version(cls, value: str) -> str:
+        return _nonblank(value, "proposal_version")
+
+    @field_validator("context_digest")
+    @classmethod
+    def validate_context_digest(cls, value: str | None) -> str | None:
+        return None if value is None else _nonblank(value, "context_digest")
+
+    @field_validator("context_binding")
+    @classmethod
+    def validate_context_binding(cls, value: str | None) -> str | None:
+        return None if value is None else _nonblank(value, "context_binding")
+
+    @model_validator(mode="after")
+    def validate_context_binding_pair(self) -> Self:
+        if self.context_binding is not None and self.context_digest is None:
+            raise ValueError("context_binding requires context_digest")
+        return self
+
+    @field_validator("warnings")
+    @classmethod
+    def normalize_warnings(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(item.strip() for item in value if item.strip()))
+
+    @model_validator(mode="after")
+    def validate_nested_provenance(self) -> Self:
+        """Once a proposal has context, every child must share its version."""
+
+        if self.context_digest is None:
+            return self
+        children = (
+            *self.terms,
+            *self.entities,
+            *self.entity_matches,
+            *self.assertions,
+            *self.mappings,
+        )
+        for child in children:
+            if child.candidate_version != self.proposal_version:
+                raise ValueError("proposal child candidate_version does not match proposal_version")
+            if child.context_digest != self.context_digest:
+                raise ValueError("proposal child context_digest does not match proposal context_digest")
+        return self
+
+
+class CandidateProvider(Protocol):
+    def propose(
+        self, fragments: list[EvidenceFragment], context: BuilderContext
+    ) -> CandidateProposal:
+        """Propose typed candidates without publishing them."""
+
+
+class DeterministicCandidateProvider:
+    """Extract a small procurement vocabulary from the local fixture format."""
+
+    canonical_entities: Mapping[str, Mapping[str, str]] = {
+        "supplier:acme": {"name": "Acme Industrial", "external_key": "ACME-001"},
+        "supplier:northstar": {
+            "name": "Northstar Components",
+            "external_key": "NORTHSTAR-001",
+        },
+    }
+    aliases: Mapping[str, str] = {"acmeindustries": "supplier:acme"}
+
+    def propose(
+        self, fragments: list[EvidenceFragment], context: BuilderContext
+    ) -> CandidateProposal:
+        ordered = sorted(fragments, key=lambda item: item.evidence_id)
+        evidence_refs = tuple(dict.fromkeys(item.evidence_id for item in ordered))
+        terms: dict[str, TermCandidate] = {}
+        entities: dict[str, EntityCandidate] = {}
+        assertions: dict[str, SemanticAssertion] = {}
+        mappings: dict[str, MappingCandidate] = {}
+        warnings: list[str] = []
+
+        for fragment in ordered:
+            content = fragment.content
+            if fragment.locator.startswith("$"):
+                self._extract_purchase_order(
+                    content,
+                    fragment,
+                    terms,
+                    entities,
+                    assertions,
+                    mappings,
+                )
+            elif fragment.locator.startswith("line:"):
+                self._extract_note(
+                    content,
+                    fragment,
+                    entities,
+                    assertions,
+                    terms,
+                )
+            else:
+                warnings.append(f"unsupported semantic locator: {fragment.locator}")
+
+        definition_refs = tuple(
+            item.evidence_id
+            for item in ordered
+            if {"promised", "date"} & _semantic_tokens(item.content)
+        )
+        definition_id = "definition:delivery-delay"
+        assertions[definition_id] = SemanticAssertion(
+            assertion_id=definition_id,
+            assertion_type="definition",
+            subject="DeliveryEvent",
+            predicate="delayRule",
+            value="actual_delivery_date > promised_delivery_date",
+            evidence_refs=definition_refs,
+            reviewer_owner="procurement-owner",
+        )
+        assumption_id = "assumption:actual-delivery-date"
+        assertions[assumption_id] = SemanticAssertion(
+            assertion_id=assumption_id,
+            assertion_type="assumption",
+            subject="purchase-order:PO-001",
+            predicate="actualDeliveryDate",
+            value="unknown",
+            release_status="unreleased",
+        )
+        candidate = CandidateProposal(
+            terms=tuple(sorted(terms.values(), key=lambda item: item.term_id)),
+            entities=tuple(sorted(entities.values(), key=lambda item: item.candidate_id)),
+            assertions=tuple(sorted(assertions.values(), key=lambda item: item.assertion_id)),
+            mappings=tuple(sorted(mappings.values(), key=lambda item: item.mapping_id)),
+            warnings=tuple(sorted(set(warnings))),
+            evidence_refs=evidence_refs,
+        ).model_copy(
+            update={
+                "proposal_version": "semantic-candidate-v1",
+                "context_digest": context.digest,
+                "terms": tuple(
+                    item.model_copy(
+                        update={
+                            "candidate_version": "semantic-candidate-v1",
+                            "context_digest": context.digest,
+                        }
+                    )
+                    for item in sorted(terms.values(), key=lambda item: item.term_id)
+                ),
+                "entities": tuple(
+                    item.model_copy(
+                        update={
+                            "candidate_version": "semantic-candidate-v1",
+                            "context_digest": context.digest,
+                        }
+                    )
+                    for item in sorted(entities.values(), key=lambda item: item.candidate_id)
+                ),
+                "assertions": tuple(
+                    item.model_copy(
+                        update={
+                            "candidate_version": "semantic-candidate-v1",
+                            "context_digest": context.digest,
+                        }
+                    )
+                    for item in sorted(assertions.values(), key=lambda item: item.assertion_id)
+                ),
+                "mappings": tuple(
+                    item.model_copy(
+                        update={
+                            "candidate_version": "semantic-candidate-v1",
+                            "context_digest": context.digest,
+                        }
+                    )
+                    for item in sorted(mappings.values(), key=lambda item: item.mapping_id)
+                ),
+            }
+        )
+        # The provider may propose a context digest for traceability, but only
+        # SemanticCandidateBuilder issues the compiler-accepted binding proof.
+        return candidate
+
+    def _extract_purchase_order(
+        self,
+        content: str,
+        fragment: EvidenceFragment,
+        terms: dict[str, TermCandidate],
+        entities: dict[str, EntityCandidate],
+        assertions: dict[str, SemanticAssertion],
+        mappings: dict[str, MappingCandidate],
+    ) -> None:
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ValueError("purchase-order evidence is not canonical JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("purchase-order evidence must be an object")
+        po_id = _nonblank(str(payload.get("po_id", "")), "po_id")
+        supplier_name = _nonblank(str(payload.get("supplier", "")), "supplier")
+        promised_date = _nonblank(str(payload.get("promised_date", "")), "promised_date")
+        po_ref = fragment.evidence_id
+        supplier_id = self._canonical_supplier_id(supplier_name)
+        supplier_candidate_id = f"supplier:{_normalize_name(supplier_name)}"
+        entities[supplier_candidate_id] = EntityCandidate(
+            candidate_id=supplier_candidate_id,
+            entity_type="supplier",
+            name=supplier_name,
+            external_key=self._source_external_key(payload),
+            source_evidence_refs=(po_ref,),
+        )
+        po_candidate_id = f"purchase-order:{po_id}"
+        entities[po_candidate_id] = EntityCandidate(
+            candidate_id=po_candidate_id,
+            entity_type="purchase_order",
+            name=po_id,
+            external_key=po_id,
+            source_evidence_refs=(po_ref,),
+        )
+        terms["term:supplier"] = TermCandidate(
+            term_id="term:supplier",
+            surface_forms=("supplier",),
+            canonical_label="Supplier",
+            definition_candidate="A party responsible for fulfilling a purchase order.",
+            source_evidence_refs=(po_ref,),
+        )
+        terms["term:purchase-order"] = TermCandidate(
+            term_id="term:purchase-order",
+            surface_forms=("purchase order", "PO"),
+            canonical_label="PurchaseOrder",
+            definition_candidate="A commercial request with a promised delivery date.",
+            source_evidence_refs=(po_ref,),
+        )
+        assertions[f"fact:{po_id}:supplier"] = SemanticAssertion(
+            assertion_id=f"fact:{po_id}:supplier",
+            assertion_type="fact",
+            subject=po_candidate_id,
+            predicate="supplier",
+            value=supplier_candidate_id,
+            evidence_refs=(po_ref,),
+        )
+        assertions[f"fact:{po_id}:promised-date"] = SemanticAssertion(
+            assertion_id=f"fact:{po_id}:promised-date",
+            assertion_type="fact",
+            subject=po_candidate_id,
+            predicate="promisedDeliveryDate",
+            value=promised_date,
+            evidence_refs=(po_ref,),
+        )
+        mappings[f"mapping:{po_id}:supplier"] = MappingCandidate(
+            mapping_id=f"mapping:{po_id}:supplier",
+            source_evidence_refs=(po_ref,),
+            source_field_path=f"$.purchase_orders[*].supplier",
+            target_product="purchase_order",
+            target_grain="purchase_order",
+            target_field="supplier_id",
+            identity_rule="supplier canonical entity resolution",
+            time_semantics="observed_at/available_at",
+        )
+        mappings[f"mapping:{po_id}:promised-date"] = MappingCandidate(
+            mapping_id=f"mapping:{po_id}:promised-date",
+            source_evidence_refs=(po_ref,),
+            source_field_path="$.purchase_orders[*].promised_date",
+            target_product="purchase_order",
+            target_grain="purchase_order",
+            target_field="promised_delivery_date",
+            identity_rule="purchase order external key",
+            time_semantics="valid_time",
+        )
+
+    def _extract_note(
+        self,
+        content: str,
+        fragment: EvidenceFragment,
+        entities: dict[str, EntityCandidate],
+        assertions: dict[str, SemanticAssertion],
+        terms: dict[str, TermCandidate],
+    ) -> None:
+        ref = fragment.evidence_id
+        variant = re.search(
+            r"(?P<alias>[A-Za-z ]+) is the display-name variant for (?P<canonical>[A-Za-z ]+)\.",
+            content,
+        )
+        if variant:
+            alias = variant.group("alias").strip()
+            canonical = variant.group("canonical").strip()
+            alias_id = self._alias_candidate_id(alias)
+            entities[alias_id] = EntityCandidate(
+                candidate_id=alias_id,
+                entity_type="supplier",
+                name=alias,
+                source_evidence_refs=(ref,),
+                conflict_refs=(f"conflict:{alias_id}:display-name",),
+            )
+            assertions[f"fact:{alias_id}:alias"] = SemanticAssertion(
+                assertion_id=f"fact:{alias_id}:alias",
+                assertion_type="fact",
+                subject=alias_id,
+                predicate="displayNameVariantOf",
+                value=self._canonical_supplier_id(canonical),
+                evidence_refs=(ref,),
+            )
+            terms["term:display-name-variant"] = TermCandidate(
+                term_id="term:display-name-variant",
+                surface_forms=("display-name variant",),
+                canonical_label="DisplayNameVariant",
+                definition_candidate="A source-specific name that may refer to an existing entity.",
+                source_evidence_refs=(ref,),
+            )
+        date_change = re.search(
+            r"(?P<alias>[A-Za-z ]+) promised date changed to (?P<date>\d{4}-\d{2}-\d{2})\.",
+            content,
+        )
+        if date_change:
+            alias_id = self._alias_candidate_id(date_change.group("alias"))
+            if alias_id in entities:
+                assertions[f"inference:{alias_id}:promised-date-revision"] = SemanticAssertion(
+                    assertion_id=f"inference:{alias_id}:promised-date-revision",
+                    assertion_type="inference",
+                    subject=alias_id,
+                    predicate="promisedDateRevision",
+                    value=date_change.group("date"),
+                    evidence_refs=(ref,),
+                )
+        actual = re.search(
+            r"(?:actual|delivered|delivery) date(?: was| is|:)?\s*(\d{4}-\d{2}-\d{2})",
+            content,
+            re.IGNORECASE,
+        )
+        if actual:
+            assertions["fact:PO-001:actual-date"] = SemanticAssertion(
+                assertion_id="fact:PO-001:actual-date",
+                assertion_type="fact",
+                subject="purchase-order:PO-001",
+                predicate="actualDeliveryDate",
+                value=actual.group(1),
+                evidence_refs=(ref,),
+            )
+
+    def _canonical_supplier_id(self, name: str) -> str:
+        normalized = _normalize_name(name)
+        if normalized in self.aliases:
+            return self.aliases[normalized]
+        for entity_id, value in self.canonical_entities.items():
+            if _normalize_name(value["name"]) == normalized:
+                return entity_id
+        return f"supplier:{normalized}"
+
+    def _alias_candidate_id(self, name: str) -> str:
+        normalized = _normalize_name(name)
+        canonical_id = self.aliases.get(normalized)
+        if canonical_id == "supplier:acme":
+            return "supplier:acme-east"
+        return f"supplier:{normalized}"
+
+    @staticmethod
+    def _source_external_key(payload: Mapping[str, Any]) -> str | None:
+        """Only accept an external key when the source explicitly carries it."""
+
+        value = payload.get("supplier_external_key")
+        if value is None:
+            return None
+        return _nonblank(str(value), "supplier_external_key")
+
+
+class EntityResolver:
+    """Resolve identities conservatively and preserve ambiguous matches."""
+
+    def __init__(
+        self,
+        canonical_entities: Mapping[str, Mapping[str, str]] | None = None,
+        aliases: Mapping[str, str] | None = None,
+    ) -> None:
+        self._canonical_entities = dict(canonical_entities or DeterministicCandidateProvider.canonical_entities)
+        self._aliases = {
+            _normalize_name(key): value
+            for key, value in (aliases or DeterministicCandidateProvider.aliases).items()
+        }
+
+    def resolve(self, candidates: list[EntityCandidate], strategy_version: str) -> list[EntityMatch]:
+        strategy_version = _nonblank(strategy_version, "strategy_version")
+        results: list[EntityMatch] = []
+        for candidate in candidates:
+            exact = self._external_key_match(candidate)
+            if exact is not None:
+                results.append(
+                    EntityMatch(
+                        candidate_id=candidate.candidate_id,
+                        canonical_entity_id=exact,
+                        score=1.0,
+                        threshold=1.0,
+                        matching_fields=("external_key",) if candidate.external_key else ("name",),
+                        algorithm_version=strategy_version,
+                        status="confirmed",
+                    )
+                )
+                continue
+            name_match = self._name_match(candidate)
+            if name_match is not None:
+                results.append(
+                    EntityMatch(
+                        candidate_id=candidate.candidate_id,
+                        canonical_entity_id=name_match,
+                        score=0.86,
+                        threshold=0.8,
+                        matching_fields=("name",),
+                        algorithm_version=strategy_version,
+                        conflict_refs=candidate.conflict_refs,
+                        status="probable_match",
+                    )
+                )
+                continue
+            alias_target = self._aliases.get(_normalize_name(candidate.name))
+            if alias_target is not None:
+                results.append(
+                    EntityMatch(
+                        candidate_id=candidate.candidate_id,
+                        canonical_entity_id=alias_target,
+                        score=0.9,
+                        threshold=0.8,
+                        matching_fields=("alias", "name"),
+                        algorithm_version=strategy_version,
+                        conflict_refs=tuple(
+                            dict.fromkeys(
+                                (*candidate.conflict_refs, f"conflict:{candidate.candidate_id}:alias")
+                            )
+                        ),
+                        status="probable_match",
+                    )
+                )
+                continue
+            results.append(
+                EntityMatch(
+                    candidate_id=candidate.candidate_id,
+                    score=0.0,
+                    threshold=0.8,
+                    matching_fields=(),
+                    algorithm_version=strategy_version,
+                    conflict_refs=candidate.conflict_refs,
+                    status="unresolved",
+                )
+            )
+        return results
+
+    def _external_key_match(self, candidate: EntityCandidate) -> str | None:
+        if candidate.external_key:
+            for entity_id, data in self._canonical_entities.items():
+                if data.get("external_key") == candidate.external_key:
+                    return entity_id
+        return None
+
+    def _name_match(self, candidate: EntityCandidate) -> str | None:
+        normalized = _normalize_name(candidate.name)
+        for entity_id, data in self._canonical_entities.items():
+            if _normalize_name(data.get("name", "")) == normalized:
+                return entity_id
+        return None
+
+
+class SemanticCandidateBuilder:
+    """Run a provider and enforce evidence/epistemic invariants."""
+
+    def __init__(
+        self,
+        provider: CandidateProvider,
+        resolver: EntityResolver | None = None,
+        strategy_version: str = "entity-resolver-v1",
+    ) -> None:
+        self._provider = provider
+        provider_entities = getattr(provider, "canonical_entities", None)
+        provider_aliases = getattr(provider, "aliases", None)
+        self._resolver = resolver or EntityResolver(provider_entities, provider_aliases)
+        self._strategy_version = _nonblank(strategy_version, "strategy_version")
+
+    def build(
+        self, fragments: list[EvidenceFragment], context: BuilderContext
+    ) -> CandidateProposal:
+        proposal = self._provider.propose(list(fragments), context)
+        if proposal.release_eligibility == "eligible":
+            raise ValueError("candidate provider cannot self-approve a proposal")
+        if proposal.context_digest is not None and proposal.context_digest != context.digest:
+            raise ValueError("proposal context_digest does not match builder context")
+        self._validate_draft_provenance(proposal)
+        evidence_refs = {item.evidence_id for item in fragments}
+        fragment_by_id = {item.evidence_id: item for item in fragments}
+        self._validate_evidence_refs(proposal, fragment_by_id)
+        self._validate_assertions(proposal.assertions, fragment_by_id, proposal.entities)
+        matches = tuple(
+            self._resolver.resolve(list(proposal.entities), self._strategy_version)
+        )
+        terms = tuple(
+            TermCandidate(
+                **{
+                    **item.model_dump(mode="python"),
+                    "candidate_version": proposal.proposal_version,
+                    "context_digest": context.digest,
+                }
+            )
+            for item in proposal.terms
+        )
+        entities = tuple(
+            EntityCandidate(
+                **{
+                    **item.model_dump(mode="python"),
+                    "candidate_version": proposal.proposal_version,
+                    "context_digest": context.digest,
+                }
+            )
+            for item in proposal.entities
+        )
+        matches = tuple(
+            EntityMatch(
+                **{
+                    **item.model_dump(mode="python"),
+                    "candidate_version": proposal.proposal_version,
+                    "context_digest": context.digest,
+                }
+            )
+            for item in matches
+        )
+        assertions = tuple(
+            SemanticAssertion(
+                **{
+                    **item.model_dump(mode="python"),
+                    "candidate_version": proposal.proposal_version,
+                    "context_digest": context.digest,
+                }
+            )
+            for item in proposal.assertions
+        )
+        mappings = tuple(
+            MappingCandidate(
+                **{
+                    **item.model_dump(mode="python"),
+                    "candidate_version": proposal.proposal_version,
+                    "context_digest": context.digest,
+                }
+            )
+            for item in proposal.mappings
+        )
+        candidate = CandidateProposal(
+            terms=terms,
+            entities=entities,
+            entity_matches=matches,
+            assertions=assertions,
+            mappings=mappings,
+            warnings=proposal.warnings,
+            evidence_refs=proposal.evidence_refs,
+            proposal_version=proposal.proposal_version,
+            context_digest=context.digest,
+            context_binding=None,
+            release_eligibility=proposal.release_eligibility,
+        )
+        binding = _ContextBindingAuthority.issue(
+            context.digest, candidate.model_dump(mode="python")
+        )
+        return candidate.model_copy(update={"context_binding": binding})
+
+    @staticmethod
+    def _validate_assertions(
+        assertions: Sequence[SemanticAssertion],
+        fragments: Mapping[str, EvidenceFragment],
+        entities: Sequence[EntityCandidate],
+    ) -> None:
+        entity_ids = {item.candidate_id for item in entities}
+        for assertion in assertions:
+            refs = set(assertion.evidence_refs)
+            if assertion.assertion_type != "assumption" and not refs:
+                raise ValueError(
+                    f"{assertion.assertion_type} assertion {assertion.assertion_id} requires evidence"
+                )
+            if not refs.issubset(fragments):
+                raise ValueError(f"assertion {assertion.assertion_id} references unknown evidence")
+            if (
+                assertion.assertion_type in {"fact", "inference"}
+                and assertion.subject.startswith(("supplier:", "purchase-order:"))
+                and assertion.subject not in entity_ids
+            ):
+                raise ValueError(
+                    f"{assertion.assertion_type} {assertion.assertion_id} references unknown subject candidate"
+                )
+            if assertion.assertion_type in {"fact", "definition", "rule", "inference"}:
+                for ref in assertion.evidence_refs:
+                    if not SemanticCandidateBuilder._evidence_supports_assertion(
+                        assertion, fragments[ref]
+                    ):
+                        raise ValueError(
+                            f"evidence {ref} does not support assertion {assertion.assertion_id}"
+                        )
+
+    @staticmethod
+    def _evidence_supports_assertion(
+        assertion: SemanticAssertion, fragment: EvidenceFragment
+    ) -> bool:
+        content_tokens = _semantic_tokens(fragment.content)
+        compact_content = _compact_text(fragment.content)
+        values = (assertion.subject, assertion.predicate, assertion.value)
+        compact_matches = {
+            _compact_text(str(value))
+            for value in values
+            if len(_compact_text(str(value))) >= 3
+            and _compact_text(str(value)) not in _GENERIC_ASSERTION_TOKENS
+        }
+        if any(candidate in compact_content for candidate in compact_matches):
+            return True
+        assertion_tokens = set().union(*(_semantic_tokens(value) for value in values))
+        if assertion.assertion_type in {"definition", "rule"}:
+            return len(assertion_tokens & content_tokens) >= 2
+        specific_tokens = assertion_tokens - _GENERIC_ASSERTION_TOKENS
+        return bool(specific_tokens & content_tokens)
+
+    @staticmethod
+    def _validate_evidence_refs(
+        proposal: CandidateProposal, fragments: Mapping[str, EvidenceFragment]
+    ) -> None:
+        evidence_refs = set(fragments)
+        if not set(proposal.evidence_refs).issubset(evidence_refs):
+            raise ValueError("proposal references unknown evidence")
+        proposal_refs = set(proposal.evidence_refs)
+        for assertion in proposal.assertions:
+            if not set(assertion.evidence_refs).issubset(proposal_refs):
+                raise ValueError(
+                    f"assertion {assertion.assertion_id} references evidence outside proposal evidence"
+                )
+        for term in proposal.terms:
+            if not term.source_evidence_refs:
+                raise ValueError(f"term {term.term_id} requires source evidence")
+            if not set(term.source_evidence_refs).issubset(proposal_refs):
+                raise ValueError(f"term {term.term_id} references evidence outside proposal evidence")
+            if not any(
+                SemanticCandidateBuilder._candidate_supported_by_fragment(term, fragments[ref])
+                for ref in term.source_evidence_refs
+            ):
+                raise ValueError(f"term {term.term_id} evidence does not support candidate")
+        for entity in proposal.entities:
+            if not entity.source_evidence_refs:
+                raise ValueError(f"entity {entity.candidate_id} requires source evidence")
+            if not set(entity.source_evidence_refs).issubset(proposal_refs):
+                raise ValueError(f"entity {entity.candidate_id} references evidence outside proposal evidence")
+            if not any(
+                SemanticCandidateBuilder._candidate_supported_by_fragment(entity, fragments[ref])
+                for ref in entity.source_evidence_refs
+            ):
+                raise ValueError(f"entity {entity.candidate_id} evidence does not support candidate")
+            if entity.external_key and not any(
+                _compact_text(entity.external_key) in _compact_text(fragments[ref].content)
+                for ref in entity.source_evidence_refs
+            ):
+                raise ValueError(
+                    f"entity {entity.candidate_id} external_key is not present in source evidence"
+                )
+        for mapping in proposal.mappings:
+            if not set(mapping.source_evidence_refs).issubset(proposal_refs):
+                raise ValueError(f"mapping {mapping.mapping_id} references evidence outside proposal evidence")
+            if not any(
+                SemanticCandidateBuilder._mapping_supported_by_fragment(mapping, fragments[ref])
+                for ref in mapping.source_evidence_refs
+            ):
+                raise ValueError(f"mapping {mapping.mapping_id} evidence does not support mapping")
+
+    @staticmethod
+    def _candidate_supported_by_fragment(
+        candidate: TermCandidate | EntityCandidate, fragment: EvidenceFragment
+    ) -> bool:
+        compact_content = _compact_text(fragment.content)
+        if isinstance(candidate, EntityCandidate):
+            return _compact_text(candidate.name) in compact_content
+        forms = (*candidate.surface_forms, candidate.canonical_label)
+        return any(_compact_text(form) in compact_content for form in forms)
+
+    @staticmethod
+    def _mapping_supported_by_fragment(
+        mapping: MappingCandidate, fragment: EvidenceFragment
+    ) -> bool:
+        path_leaf = mapping.source_field_path.rsplit(".", 1)[-1]
+        path_leaf = path_leaf.replace("[*]", "")
+        return _compact_text(path_leaf) in _compact_text(fragment.content)
+
+    @staticmethod
+    def _validate_draft_provenance(proposal: CandidateProposal) -> None:
+        children = (
+            *proposal.terms,
+            *proposal.entities,
+            *proposal.entity_matches,
+            *proposal.assertions,
+            *proposal.mappings,
+        )
+        for child in children:
+            if child.candidate_version != "unversioned" and child.candidate_version != proposal.proposal_version:
+                raise ValueError("candidate_version does not match proposal_version")
+            if child.context_digest is not None and child.context_digest != proposal.context_digest:
+                raise ValueError("candidate context_digest does not match proposal context_digest")
+
+
+__all__ = [
+    "BuilderContext",
+    "CandidateProposal",
+    "CandidateProvider",
+    "DeterministicCandidateProvider",
+    "EntityCandidate",
+    "EntityMatch",
+    "EntityResolver",
+    "MappingCandidate",
+    "SemanticAssertion",
+    "SemanticCandidateBuilder",
+    "TermCandidate",
+]

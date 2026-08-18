@@ -1,4 +1,4 @@
-"""Route registration for the AI FDE project cockpit."""
+"""Route registration for Shipyard build, review, gate, and release APIs."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, JsonValue, ValidationError
 from aifde.domain.actions import ActionRequest
 from aifde.domain.stages import StageState
 from aifde.gates.engine import TransitionBlocked
+from aifde.ontology.computation import GovernedActionRequest
 from aifde.policy.capabilities import PolicyEngine
 
 
@@ -104,6 +105,23 @@ class ActionOutcomeResponse(BaseModel):
     model_config = _model_config()
 
 
+class GovernedActionExecuteRequest(BaseModel):
+    request: GovernedActionRequest
+    actor: str
+
+    model_config = _model_config("forbid")
+
+
+class GovernedActionResponse(BaseModel):
+    action_id: str
+    external_ref: str
+    outcome_id: str
+    reconciliation_status: str
+    status: str
+
+    model_config = _model_config()
+
+
 def _get_attr(value: Any, name: str, default: Any = None) -> Any:
     if isinstance(value, dict):
         return value.get(name, default)
@@ -135,6 +153,7 @@ def build_router(
     stage_runner: Any,
     action_broker: Any,
     policy: PolicyEngine | None = None,
+    governed_action_broker: Any | None = None,
 ) -> APIRouter:
     """Return the route collection backed by the supplied domain services."""
 
@@ -280,6 +299,38 @@ def build_router(
             outcome_id=_get_attr(outcome, "outcome_id"),
             action_id=_get_attr(outcome, "action_id", payload.request.action_id),
             status=_get_attr(outcome, "status"),
+        )
+
+    @router.post("/governed-actions/dry-run", response_model=dict[str, Any])
+    def dry_run_governed_action(payload: GovernedActionExecuteRequest) -> dict[str, Any]:
+        if governed_action_broker is None:
+            raise HTTPException(status_code=503, detail="governed Action broker is not configured")
+        try:
+            preview = governed_action_broker.dry_run(payload.request, actor=payload.actor)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return preview.model_dump(mode="json")
+
+    @router.post("/governed-actions", response_model=GovernedActionResponse)
+    def execute_governed_action(
+        payload: GovernedActionExecuteRequest,
+    ) -> GovernedActionResponse:
+        if governed_action_broker is None:
+            raise HTTPException(status_code=503, detail="governed Action broker is not configured")
+        try:
+            result = governed_action_broker.execute(payload.request, actor=payload.actor)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return GovernedActionResponse(
+            action_id=payload.request.action_id,
+            external_ref=result.receipt.external_ref,
+            outcome_id=result.outcome_link.outcome_id,
+            reconciliation_status=result.reconciliation.status,
+            status=result.receipt.status,
         )
 
     return router

@@ -5,8 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
+from aifde.agents.graph import AgentExecutionContext, AgentExecutionOutput, AgentNode
+from aifde.agents.roles import AgentRole
 from aifde.domain.artifacts import Artifact
 from aifde.policy.capabilities import Capability, PolicyEngine, ToolContext
 from aifde.policy.gateway import ToolGateway
@@ -33,6 +35,36 @@ class ChallengerAgent(Protocol):
 
     def run(self, contract: TaskContract, context: AgentContext) -> ChallengeReport:
         """Return a typed challenge report."""
+
+
+class RoutedDomainAgentExecutor:
+    """Route typed domain roles to isolated provider handlers.
+
+    Handlers return ``AgentExecutionOutput`` and therefore can only submit a
+    candidate.  The workspace commit, review, release, and Action boundaries
+    remain owned by ``DomainAgentTeam`` and the platform gates.
+    """
+
+    def __init__(
+        self,
+        handlers: Mapping[
+            AgentRole | str,
+            Callable[[AgentNode, AgentExecutionContext], AgentExecutionOutput],
+        ],
+    ) -> None:
+        self._handlers = {
+            role if isinstance(role, AgentRole) else AgentRole(role): handler
+            for role, handler in handlers.items()
+        }
+
+    def execute(
+        self, node: AgentNode, context: AgentExecutionContext
+    ) -> AgentExecutionOutput:
+        try:
+            handler = self._handlers[node.role]
+        except KeyError as exc:
+            raise PermissionError(f"no provider handler registered for {node.role.value}") from exc
+        return AgentExecutionOutput.model_validate(handler(node, context))
 
 
 @dataclass

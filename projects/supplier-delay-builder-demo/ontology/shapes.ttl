@@ -1,0 +1,15 @@
+@prefix ex: <urn:aifde:supplier-delay:> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+
+ex:SupplierShape a sh:NodeShape ;
+    sh:targetClass ex:Supplier ;
+    sh:property [ sh:path ex:supplierId ; sh:minCount 1 ; sh:message "Supplier requires supplierId." ] .
+
+ex:PurchaseOrderShape a sh:NodeShape ;
+    sh:targetClass ex:PurchaseOrder ;
+    sh:property [ sh:path ex:purchaseOrderId ; sh:minCount 1 ; sh:message "PurchaseOrder requires purchaseOrderId." ] ;
+    sh:property [ sh:path ex:promisedDeliveryDate ; sh:minCount 1 ; sh:message "PurchaseOrder requires promisedDeliveryDate." ] .
+
+ex:DeliveryEventShape a sh:NodeShape ;
+    sh:targetClass ex:DeliveryEvent ;
+    sh:property [ sh:path ex:eventTime ; sh:minCount 1 ; sh:message "DeliveryEvent requires eventTime." ] .

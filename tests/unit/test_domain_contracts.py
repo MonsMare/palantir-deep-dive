@@ -1,10 +1,11 @@
+from datetime import datetime, timezone
 from math import inf, nan
 
 import pytest
 from pydantic import ValidationError
 
 from aifde.domain.actions import ActionRequest
-from aifde.domain.artifacts import Artifact
+from aifde.domain.artifacts import Artifact, content_hash_for
 from aifde.domain.evidence import Claim
 from aifde.domain.stages import StageState
 
@@ -87,6 +88,59 @@ def test_artifact_copy_cannot_inject_content_hash():
 
     with pytest.raises(ValueError):
         artifact.model_copy(update={"content_hash": "forged"})
+
+
+def test_artifact_new_metadata_is_backward_compatible_and_hash_is_stable():
+    artifact = Artifact.build(
+        project_id="p1", kind="DecisionContract", content={"objective": "forecast"}, owner="alice"
+    )
+
+    assert artifact.parent_artifact_ids == []
+    assert artifact.content_hash == content_hash_for(artifact.content)
+    assert artifact.validation_results == []
+    assert artifact.created_at is not None
+    assert artifact.created_at.tzinfo is not None
+    assert artifact.created_at.utcoffset() == timezone.utc.utcoffset(artifact.created_at)
+
+    timestamped = Artifact.build(
+        project_id="p1",
+        kind="DecisionContract",
+        content={"objective": "forecast"},
+        owner="alice",
+        created_at=datetime(2026, 8, 15, 8, 0, tzinfo=timezone.utc),
+    )
+    assert timestamped.created_at is not None
+    assert timestamped.created_at.tzinfo is not None
+
+    copied = artifact.model_copy(
+        update={
+            "parent_artifact_ids": ["parent-1"],
+            "producer": "agent-1",
+            "validation_results": [{"status": "passed"}],
+        },
+        deep=True,
+    )
+    assert copied.parent_artifact_ids == ["parent-1"]
+    assert copied.producer == "agent-1"
+    assert copied.validation_results == [{"status": "passed"}]
+    assert copied.content_hash == content_hash_for(copied.content)
+
+
+def test_legacy_artifact_without_created_at_gets_a_utc_compatibility_timestamp():
+    artifact = Artifact.build(
+        artifact_id="artifact-1",
+        project_id="p1",
+        kind="DecisionContract",
+        content={"objective": "forecast"},
+        owner="alice",
+    )
+    legacy_payload = artifact.model_dump(exclude={"created_at"})
+
+    restored_legacy = Artifact.model_validate(legacy_payload)
+
+    assert restored_legacy.created_at is not None
+    assert restored_legacy.created_at.tzinfo is not None
+    assert artifact == restored_legacy
 
 
 def test_artifact_hash_changes_when_content_changes_and_survives_round_trip():

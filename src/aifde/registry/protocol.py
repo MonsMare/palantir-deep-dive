@@ -6,6 +6,7 @@ from typing import Protocol
 
 from aifde.domain.artifacts import Artifact
 from aifde.domain.evidence import Evidence
+from aifde.shipyard.store import ShipyardStore
 
 
 class ArtifactRepository(Protocol):
@@ -41,6 +42,7 @@ class RegistryTransaction(Protocol):
 
     artifacts: ArtifactRepository
     evidence: EvidenceRepository
+    shipyard: ShipyardStore
 
     def commit(self) -> None:
         """Atomically make all writes in this transaction durable."""

@@ -12,6 +12,8 @@ import polars as pl
 from pydantic import BaseModel, ConfigDict, Field
 from sklearn.ensemble import HistGradientBoostingRegressor
 
+from aifde.ml.adapters import TabularModelAdapter
+
 from .data_products import DataProductBundle
 from .features import build_features
 from .labels import build_labels
@@ -269,6 +271,15 @@ def _aware(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def governed_delivery_model_adapter() -> TabularModelAdapter:
+    """Expose the demo's feature schema through the platform model boundary."""
+
+    return TabularModelAdapter(
+        DeliveryModel.FEATURE_COLUMNS,
+        model_version="delivery-hgb-v1",
+    )
+
+
 __all__ = [
     "BaselineModel",
     "DeliveryModel",
@@ -277,6 +288,7 @@ __all__ = [
     "ModelVersion",
     "ReplayReport",
     "evaluate_model",
+    "governed_delivery_model_adapter",
     "release_model",
     "run_replay",
     "temporal_split",
