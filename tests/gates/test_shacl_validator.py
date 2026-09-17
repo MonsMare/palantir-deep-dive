@@ -34,7 +34,7 @@ def test_fallback_turtle_parser_rejects_prefix_without_terminating_dot(monkeypat
         OntologyDocument.load(malformed)
 
 
-def test_shape_loader_rejects_unsupported_shacl_property_constraints():
+def test_shape_loader_supports_typed_and_cardinality_constraints():
     unsupported_shapes = """
         @prefix ex: <http://example.com/> .
         @prefix sh: <http://www.w3.org/ns/shacl#> .
@@ -49,8 +49,40 @@ def test_shape_loader_rejects_unsupported_shacl_property_constraints():
             ] .
     """
 
-    with pytest.raises(ShapeParseError, match="unsupported.*sh:(maxCount|datatype)"):
+    document = ShapeLoader.load(unsupported_shapes)
+    constraint = document.constraints[0]
+    assert constraint.max_count == 1
+    assert constraint.datatype == "http://example.com/Person"
+
+
+def test_shape_loader_rejects_unsupported_shacl_property_constraints():
+    unsupported_shapes = """
+        @prefix ex: <http://example.com/> .
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+
+        ex:RequirementShape a sh:NodeShape ;
+            sh:targetClass ex:Requirement ;
+            sh:property [
+                sh:path ex:owner ;
+                sh:closed true ;
+                sh:message "Owner must use the controlled identity format." ;
+            ] .
+    """
+
+    with pytest.raises(ShapeParseError, match="unsupported.*sh:closed"):
         ShapeLoader.load(unsupported_shapes)
+
+
+def test_shape_loader_supports_pattern_constraint():
+    shapes = """
+        @prefix ex: <http://example.com/> .
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+        ex:RequirementShape a sh:NodeShape ;
+            sh:targetClass ex:Requirement ;
+            sh:property [ sh:path ex:owner ; sh:minCount 1 ; sh:pattern "^owner:" ] .
+    """
+    document = ShapeLoader.load(shapes)
+    assert document.constraints[0].pattern == "^owner:"
 
 
 def test_validation_result_nested_collections_are_defensively_immutable():

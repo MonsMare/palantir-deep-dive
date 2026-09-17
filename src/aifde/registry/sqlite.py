@@ -328,6 +328,39 @@ class SQLiteRegistry:
                 created_at TEXT NOT NULL,
                 predecessor_hash TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS builder_compile_runs (
+                compile_hash TEXT PRIMARY KEY,
+                ontology_version TEXT NOT NULL,
+                artifact_hashes_json TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS builder_source_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                source_asset_id TEXT NOT NULL,
+                version TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                payload_hash TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS builder_field_provenance (
+                compile_hash TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                field_name TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                PRIMARY KEY (compile_hash, target_id, field_name),
+                FOREIGN KEY (compile_hash) REFERENCES builder_compile_runs(compile_hash)
+            );
+
+            CREATE TABLE IF NOT EXISTS builder_release_manifests (
+                release_id TEXT PRIMARY KEY,
+                ontology_version TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                payload_hash TEXT NOT NULL
+            );
             """
         )
         self._ensure_column(

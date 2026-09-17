@@ -299,7 +299,7 @@ def _tokenize_fallback(text: str) -> list[str]:
             newline = text.find("\n", index)
             index = length if newline < 0 else newline + 1
             continue
-        if char in ";,[]":
+        if char in ";,[]()":
             tokens.append(char)
             index += 1
             continue
@@ -334,9 +334,9 @@ def _tokenize_fallback(text: str) -> list[str]:
             index = end + 1
             continue
         start = index
-        while index < length and not text[index].isspace() and text[index] not in ";,[]<>\"":
+        while index < length and not text[index].isspace() and text[index] not in ";,[]()<>\"":
             if text[index] == "." and (
-                index + 1 == length or text[index + 1].isspace() or text[index + 1] in ";,[]"
+                index + 1 == length or text[index + 1].isspace() or text[index + 1] in ";,[]()"
             ):
                 break
             index += 1
@@ -414,7 +414,58 @@ def _parse_fallback_object(
         _parse_predicate_objects(cursor, prefixes, subject, triples, stop_tokens={"]"})
         cursor.expect("]")
         return subject
-    return _parse_fallback_term(cursor.pop(), prefixes, position="object")
+    if cursor.peek() == "(":
+        cursor.pop()
+        if cursor.peek() == ")":
+            cursor.pop()
+            return _FallbackURI("http://www.w3.org/1999/02/22-rdf-syntax-ns#nil")
+        head: _FallbackBNode | None = None
+        previous: _FallbackBNode | None = None
+        while cursor.peek() != ")":
+            cursor.bnode_index += 1
+            current = _FallbackBNode(f"b{cursor.bnode_index}")
+            if head is None:
+                head = current
+            if previous is not None:
+                triples.append(
+                    (
+                        previous,
+                        _FallbackURI("http://www.w3.org/1999/02/22-rdf-syntax-ns#rest"),
+                        current,
+                    )
+                )
+            value = _parse_fallback_object(cursor, prefixes, triples)
+            triples.append(
+                (
+                    current,
+                    _FallbackURI("http://www.w3.org/1999/02/22-rdf-syntax-ns#first"),
+                    value,
+                )
+            )
+            previous = current
+            if cursor.peek() is None:
+                raise RDFParseError("unterminated Turtle collection")
+        cursor.pop()
+        assert head is not None and previous is not None
+        triples.append(
+            (
+                previous,
+                _FallbackURI("http://www.w3.org/1999/02/22-rdf-syntax-ns#rest"),
+                _FallbackURI("http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"),
+            )
+        )
+        return head
+    value = _parse_fallback_term(cursor.pop(), prefixes, position="object")
+    if isinstance(value, _FallbackLiteral) and cursor.peek() is not None:
+        marker = cursor.peek()
+        if marker.startswith("^^"):
+            cursor.pop()
+            datatype_token = marker[2:] or cursor.pop()
+            datatype = _parse_fallback_term(datatype_token, prefixes, position="object")
+            if not isinstance(datatype, _FallbackURI):
+                raise RDFParseError("typed literal datatype must be an IRI")
+            value = _FallbackLiteral(value.value, datatype=datatype.value)
+    return value
 
 
 def _parse_fallback_term(token: str, prefixes: dict[str, str], *, position: str) -> Any:

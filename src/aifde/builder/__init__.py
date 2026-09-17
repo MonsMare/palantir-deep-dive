@@ -1,6 +1,12 @@
 """Evidence-driven ontology builder contracts and source registration."""
 
-from .contracts import EvidenceFragment, SourceAsset, SourceSnapshot
+from .contracts import (
+    EvidenceFragment,
+    FieldEvidenceLocation,
+    FieldValueProvenance,
+    SourceAsset,
+    SourceSnapshot,
+)
 from .compiler import (
     CompileResult,
     CompileValidation,
@@ -11,11 +17,14 @@ from .compiler import (
 from .flow import BuilderRunConfig, BuilderRunResult, EvidenceDrivenOntologyBuilder
 from .gates import BuilderGateReport, BuilderGateRunner, OntologyReleasePackage
 from .sources import SourceRegistry
+from .persistence import BuilderRegistry, SQLiteBuilderRegistry
 
 __all__ = [
     "CompileResult",
     "CompileValidation",
     "EvidenceFragment",
+    "FieldEvidenceLocation",
+    "FieldValueProvenance",
     "MappingCompiler",
     "MappingSpec",
     "OntologyCandidate",
@@ -28,4 +37,6 @@ __all__ = [
     "BuilderRunResult",
     "EvidenceDrivenOntologyBuilder",
     "OntologyReleasePackage",
+    "BuilderRegistry",
+    "SQLiteBuilderRegistry",
 ]

@@ -20,14 +20,27 @@ SHACL_PROPERTY = f"{SHACL_NS}property"
 SHACL_TARGET_CLASS = f"{SHACL_NS}targetClass"
 SHACL_PATH = f"{SHACL_NS}path"
 SHACL_MIN_COUNT = f"{SHACL_NS}minCount"
+SHACL_MAX_COUNT = f"{SHACL_NS}maxCount"
+SHACL_DATATYPE = f"{SHACL_NS}datatype"
+SHACL_CLASS = f"{SHACL_NS}class"
+SHACL_IN = f"{SHACL_NS}in"
+SHACL_PATTERN = f"{SHACL_NS}pattern"
 SHACL_MESSAGE = f"{SHACL_NS}message"
 SHACL_SEVERITY = f"{SHACL_NS}severity"
 SHACL_VIOLATION = f"{SHACL_NS}Violation"
 SHACL_WARNING = f"{SHACL_NS}Warning"
+RDF_FIRST = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first"
+RDF_REST = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest"
+RDF_NIL = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"
 _SUPPORTED_SHACL_PROPERTY_PREDICATES = frozenset(
     {
         SHACL_PATH,
         SHACL_MIN_COUNT,
+        SHACL_MAX_COUNT,
+        SHACL_DATATYPE,
+        SHACL_CLASS,
+        SHACL_IN,
+        SHACL_PATTERN,
         SHACL_MESSAGE,
         SHACL_SEVERITY,
     }
@@ -53,6 +66,11 @@ class ShapeConstraint:
     target_class: str
     path: str
     min_count: int = 0
+    max_count: int | None = None
+    datatype: str | None = None
+    value_class: str | None = None
+    allowed_values: tuple[str, ...] = ()
+    pattern: str | None = None
     message: str = "SHACL property constraint failed."
     severity: str = SHACL_VIOLATION
 
@@ -63,6 +81,22 @@ class ShapeConstraint:
                 raise ValueError(f"{name} must be a non-empty string")
         if type(self.min_count) is not int or self.min_count < 0:
             raise ValueError("min_count must be a non-negative integer")
+        if self.max_count is not None and (
+            type(self.max_count) is not int or self.max_count < 0
+        ):
+            raise ValueError("max_count must be None or a non-negative integer")
+        if self.max_count is not None and self.max_count < self.min_count:
+            raise ValueError("max_count must not be less than min_count")
+        for name in ("datatype", "value_class"):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not str or not value.strip()):
+                raise ValueError(f"{name} must be None or a non-empty string")
+        if type(self.allowed_values) is not tuple or any(
+            type(item) is not str or not item.strip() for item in self.allowed_values
+        ):
+            raise ValueError("allowed_values must be a tuple of non-empty strings")
+        if self.pattern is not None and type(self.pattern) is not str:
+            raise ValueError("pattern must be None or a string")
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +144,27 @@ def _as_int(value: Any, *, shape_id: str, predicate: str) -> int:
     if result < 0:
         raise ShapeParseError(f"shape {shape_id!r} minCount must not be negative")
     return result
+
+
+def _rdf_list_values(graph: Any, head: Any, *, shape_id: str, predicate: str) -> tuple[str, ...]:
+    values: list[str] = []
+    current = head
+    visited: set[str] = set()
+    while _uri(current) != RDF_NIL:
+        marker = _uri(current)
+        if marker in visited:
+            raise ShapeParseError(
+                f"shape {shape_id!r} predicate {predicate!r} contains a cyclic RDF list"
+            )
+        visited.add(marker)
+        first = _first(graph, current, RDF_FIRST, required=True)
+        values.append(_uri(first))
+        current = _first(graph, current, RDF_REST, required=True)
+    if not values:
+        raise ShapeParseError(
+            f"shape {shape_id!r} predicate {predicate!r} must contain at least one value"
+        )
+    return tuple(values)
 
 
 def _format_shape_predicate(predicate: str) -> str:
@@ -172,13 +227,30 @@ def _build_constraints(graph: Any) -> tuple[ShapeConstraint, ...]:
             path_term = _first(graph, property_shape, SHACL_PATH, required=True)
             path = _uri(path_term)
             min_count_term = _first(graph, property_shape, SHACL_MIN_COUNT)
-            if min_count_term is None:
+            max_count_term = _first(graph, property_shape, SHACL_MAX_COUNT)
+            datatype_term = _first(graph, property_shape, SHACL_DATATYPE)
+            class_term = _first(graph, property_shape, SHACL_CLASS)
+            in_term = _first(graph, property_shape, SHACL_IN)
+            pattern_term = _first(graph, property_shape, SHACL_PATTERN)
+            if (
+                min_count_term is None
+                and max_count_term is None
+                and datatype_term is None
+                and class_term is None
+                and in_term is None
+                and pattern_term is None
+            ):
                 raise ShapeParseError(
                     f"shape {shape_id!r} property constraint for path {path!r} "
                     "does not contain a supported enforcing predicate"
                 )
             min_count = 0 if min_count_term is None else _as_int(
                 min_count_term, shape_id=shape_id, predicate=SHACL_MIN_COUNT
+            )
+            max_count = (
+                _as_int(max_count_term, shape_id=shape_id, predicate=SHACL_MAX_COUNT)
+                if max_count_term is not None
+                else None
             )
             message_term = _first(graph, property_shape, SHACL_MESSAGE)
             severity_term = _first(graph, property_shape, SHACL_SEVERITY)
@@ -188,6 +260,15 @@ def _build_constraints(graph: Any) -> tuple[ShapeConstraint, ...]:
                     target_class=target_class,
                     path=path,
                     min_count=min_count,
+                    max_count=max_count,
+                    datatype=_uri(datatype_term) if datatype_term is not None else None,
+                    value_class=_uri(class_term) if class_term is not None else None,
+                    allowed_values=(
+                        _rdf_list_values(graph, in_term, shape_id=shape_id, predicate=SHACL_IN)
+                        if in_term is not None
+                        else ()
+                    ),
+                    pattern=_term_value(pattern_term) if pattern_term is not None else None,
                     message=(
                         _term_value(message_term)
                         if message_term is not None

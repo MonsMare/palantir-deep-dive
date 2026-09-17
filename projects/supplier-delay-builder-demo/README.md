@@ -8,6 +8,40 @@ Markdown 记录。
 pytest tests/builder/test_builder_flow.py -q
 ```
 
+## 当前生产级硬化路径
+
+运行时可以把 Builder 的不可变记录落到 SQLite，并在进程重启后校验：
+
+```python
+from pathlib import Path
+from software_delivery_demo.builder_demo import run_supplier_delay_builder_demo
+
+result = run_supplier_delay_builder_demo(
+    Path("projects/supplier-delay-builder-demo"),
+    persistence_path=".aifde/builder.db",
+)
+assert result.release_package is not None
+```
+
+这条路径会追加保存 source snapshot、compile artifact 哈希、字段级 provenance 和 release manifest。
+`actual_delivery_date` 的 `available_at` 晚于事件日期，因此在事件资料可用前的 as-of 特征快照中不可见；
+带冲突的高影响 `probable_match` 会阻断 release。
+
+计算闭环位于 `aifde.ontology.computation`：
+
+```text
+FeatureDefinition / FeatureSnapshot
+  → LabelDefinition / LabelSnapshot
+  → PredictionArtifact
+  → DecisionCandidate
+  → GovernedActionRequest
+  → ActionOutcomeLink
+  → FeedbackLink
+```
+
+每个对象都绑定 ontology release、版本、as-of、feature snapshot 和 lineage。动作必须先通过
+`ComputationChainValidator`，再由现有受保护的 Action Broker 执行。
+
 流程会依次执行：
 
 1. 注册 source asset，捕获不可变 snapshot；

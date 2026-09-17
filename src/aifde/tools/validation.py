@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -13,6 +14,7 @@ from aifde.ontology.rdf import (
     RDF_TYPE,
     _clone_graph,
     _iter_triples,
+    _is_rdflib_graph,
     _parse_rdf_text,
     _predicate_local_name,
     _term_value,
@@ -127,19 +129,83 @@ def _format_constraint_failure(
     )
 
 
+def _format_max_constraint_failure(
+    node: Any, constraint: ShapeConstraint, actual_count: int
+) -> str:
+    return (
+        f"{constraint.message} Focus node {_format_focus_node(node)!r} violates path "
+        f"{constraint.path!r}: found {actual_count}, required at most "
+        f"{constraint.max_count}."
+    )
+
+
+def _term_datatype(term: Any) -> str | None:
+    datatype = getattr(term, "datatype", None)
+    if datatype is None:
+        # RDF 1.1 plain string literals have the xsd:string datatype.
+        if hasattr(term, "value") and isinstance(getattr(term, "value"), str):
+            return "http://www.w3.org/2001/XMLSchema#string"
+        if term.__class__.__name__ == "Literal" and isinstance(str(term), str):
+            return "http://www.w3.org/2001/XMLSchema#string"
+        return None
+    return str(datatype)
+
+
 def _fallback_validate(data_graph: Any, shape_document: ShapeDocument) -> tuple[list[str], list[str]]:
     violations: list[str] = []
     warnings: list[str] = []
     for constraint in shape_document.constraints:
         for node in _subjects_of_class(data_graph, constraint.target_class):
-            actual_count = len(_objects(data_graph, node, constraint.path))
-            if actual_count >= constraint.min_count:
-                continue
-            message = _format_constraint_failure(node, constraint, actual_count)
-            if constraint.severity.endswith("Warning") or constraint.severity == SHACL_WARNING:
-                warnings.append(message)
-            else:
-                violations.append(message)
+            values = _objects(data_graph, node, constraint.path)
+            actual_count = len(values)
+            messages: list[str] = []
+            if actual_count < constraint.min_count:
+                messages.append(_format_constraint_failure(node, constraint, actual_count))
+            if constraint.max_count is not None and actual_count > constraint.max_count:
+                messages.append(_format_max_constraint_failure(node, constraint, actual_count))
+            # Class constraints need access to the data graph rather than the value
+            # object itself, so evaluate them here with explicit graph traversal.
+            if constraint.datatype is not None:
+                for value in values:
+                    if _term_datatype(value) != constraint.datatype:
+                        messages.append(
+                            f"{constraint.message} Focus node {_format_focus_node(node)!r} "
+                            f"path {constraint.path!r} requires datatype {constraint.datatype!r}."
+                        )
+            if constraint.value_class is not None:
+                for value in values:
+                    has_class = any(
+                        subject == value
+                        and _term_value(predicate) == RDF_TYPE
+                        and _term_value(obj) == constraint.value_class
+                        for subject, predicate, obj in _iter_triples(data_graph)
+                    )
+                    if not has_class:
+                        messages.append(
+                            f"{constraint.message} Focus node {_format_focus_node(node)!r} "
+                            f"path {constraint.path!r} requires class {constraint.value_class!r}."
+                        )
+            if constraint.allowed_values:
+                for value in values:
+                    if _term_value(value) not in constraint.allowed_values:
+                        messages.append(
+                            f"{constraint.message} Focus node {_format_focus_node(node)!r} "
+                            f"path {constraint.path!r} must be one of {constraint.allowed_values!r}."
+                        )
+            if constraint.pattern is not None:
+                for value in values:
+                    if not isinstance(_term_value(value), str) or re.search(
+                        constraint.pattern, _term_value(value)
+                    ) is None:
+                        messages.append(
+                            f"{constraint.message} Focus node {_format_focus_node(node)!r} "
+                            f"path {constraint.path!r} does not match pattern {constraint.pattern!r}."
+                        )
+            for message in _unique(messages):
+                if constraint.severity.endswith("Warning") or constraint.severity == SHACL_WARNING:
+                    warnings.append(message)
+                else:
+                    violations.append(message)
     return _unique(violations), _unique(warnings)
 
 
@@ -170,6 +236,8 @@ def _result_messages(result_graph: Any) -> tuple[list[str], list[str]]:
 
 
 def _try_pyshacl(data_graph: Any, shape_graph: Any) -> tuple[bool, list[str], list[str], str] | None:
+    if not _is_rdflib_graph(data_graph) or not _is_rdflib_graph(shape_graph):
+        return None
     try:
         from pyshacl import validate as pyshacl_validate
     except ImportError:
