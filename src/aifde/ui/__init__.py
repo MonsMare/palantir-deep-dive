@@ -1,1 +1,1 @@
-"""User interfaces for the AI FDE project cockpit."""
+"""Optional sandbox views; the primary interface is Shipyard Workbench."""

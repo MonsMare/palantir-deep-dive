@@ -817,5 +817,5 @@ Ontology + 大模型 + 聊天机器人
 与本项目其他研究资料的关系：
 
 - [Palantir 文档研究索引](README.md)
-- [AI FDE 工程结构复刻项目需求与系统设计](../docs/superpowers/specs/2026-08-10-ai-fde-engineering-requirements-design.md)
-- [Ontology-AI 方法论实施计划](../docs/superpowers/plans/2026-08-10-ontology-ai-methodology.md)
+- [AI-FDE Shipyard Workbench 设计](../docs/superpowers/specs/2026-08-15-ai-fde-shipyard-workbench-design.md)
+- [Shipyard 文档入口](../docs/README.md)

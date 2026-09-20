@@ -1,4 +1,4 @@
-"""Optional Streamlit read-only cockpit for the AI FDE project."""
+"""Optional legacy Streamlit read-only cockpit for Shipyard sandbox data."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ FetchJson = Callable[[str], Any]
 
 @dataclass(frozen=True)
 class CockpitSnapshot:
-    """Read-only API data rendered by the project cockpit."""
+    """Read-only API data rendered by the sandbox cockpit."""
 
     project_id: str
     stages: list[JsonDict] = field(default_factory=list)
@@ -26,6 +26,8 @@ class CockpitSnapshot:
     open_questions: list[JsonDict] = field(default_factory=list)
     latest_diff: str | None = None
     actions: list[JsonDict] = field(default_factory=list)
+    dry_runs: list[JsonDict] = field(default_factory=list)
+    reconciliations: list[JsonDict] = field(default_factory=list)
 
     @property
     def current_stage(self) -> JsonDict | None:
@@ -57,7 +59,7 @@ def load_project_cockpit(
     api_base_url: str = "http://localhost:8000",
     fetch_json: FetchJson | None = None,
 ) -> CockpitSnapshot:
-    """Load a project cockpit snapshot through read-only API endpoints."""
+    """Load a sandbox cockpit snapshot through read-only API endpoints."""
 
     if not isinstance(project_id, str) or not project_id.strip():
         raise ValueError("project_id must be a non-empty string")
@@ -72,6 +74,8 @@ def load_project_cockpit(
     open_questions = _optional_list(fetch, f"/projects/{encoded}/open-questions")
     latest_diff = _optional_text(fetch, f"/projects/{encoded}/latest-diff")
     actions = _optional_list(fetch, f"/projects/{encoded}/actions")
+    dry_runs = _optional_list(fetch, f"/projects/{encoded}/action-dry-runs")
+    reconciliations = _optional_list(fetch, f"/projects/{encoded}/reconciliations")
 
     if latest_diff is None and artifacts:
         latest_artifact = artifacts[-1]
@@ -90,6 +94,8 @@ def load_project_cockpit(
         open_questions=open_questions,
         latest_diff=latest_diff,
         actions=actions,
+        dry_runs=dry_runs,
+        reconciliations=reconciliations,
     )
 
 
@@ -99,7 +105,7 @@ def render_dashboard(
     api_base_url: str = "http://localhost:8000",
     fetch_json: FetchJson | None = None,
 ) -> CockpitSnapshot:
-    """Render the read-only project cockpit with optional Streamlit."""
+    """Render the read-only sandbox cockpit with optional Streamlit."""
 
     try:
         import streamlit as st
@@ -114,7 +120,7 @@ def render_dashboard(
         fetch_json=fetch_json,
     )
 
-    st.title("AI FDE Project Cockpit")
+    st.title("AI-FDE Shipyard Sandbox Cockpit")
     st.caption("Read-only gate, approval, question, and artifact review surface.")
 
     st.subheader("Project")
@@ -157,6 +163,18 @@ def render_dashboard(
 
     st.subheader("Actions")
     _render_actions_read_only(st, snapshot.actions)
+
+    st.subheader("Dry-run receipts")
+    if snapshot.dry_runs:
+        st.table(snapshot.dry_runs)
+    else:
+        st.info("No dry-run receipts are available.")
+
+    st.subheader("Reconciliation")
+    if snapshot.reconciliations:
+        st.table(snapshot.reconciliations)
+    else:
+        st.info("No reconciliation records are available.")
 
     return snapshot
 

@@ -5,9 +5,18 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 from hashlib import sha256
+from threading import Event
 from typing import Any
 from uuid import uuid4
 
+from aifde.agents.budget import BudgetLedger, BudgetSpec
+from aifde.agents.graph import (
+    AgentGraph,
+    AgentRunSummary,
+    DomainAgentTeam,
+    ExecutorLike,
+)
+from aifde.agents.workspace import ArtifactWorkspace
 from aifde.domain.artifacts import Artifact, canonical_json_bytes
 from aifde.domain.gates import GateResult
 from aifde.domain.stages import StageRun, StageState
@@ -181,6 +190,32 @@ class StageRunner:
             escalation_conditions=[f"Escalate unresolved questions for {stage_id}."],
         )
         return self.run(contract)
+
+    def run_domain_team(
+        self,
+        graph: AgentGraph,
+        executor: ExecutorLike,
+        *,
+        budget: BudgetSpec | BudgetLedger | None = None,
+        max_parallelism: int = 4,
+        cancel_event: Event | None = None,
+    ) -> tuple[AgentRunSummary, ArtifactWorkspace]:
+        """Run the governed domain-agent path beside the legacy stage adapter.
+
+        The returned workspace is intentionally separate from the legacy
+        ``StageRun`` store: agent output remains a candidate until the normal
+        review/release boundary consumes it.  This keeps the existing API
+        compatibility while preventing an unreviewed agent from mutating stage
+        state or executing an external Action.
+        """
+
+        workspace = ArtifactWorkspace(project_id=self.project_id)
+        team = DomainAgentTeam(
+            workspace=workspace,
+            budget=budget,
+            max_parallelism=max_parallelism,
+        )
+        return team.run(graph, executor, cancel_event=cancel_event), workspace
 
     def challenge(self, artifact_id: str) -> ChallengeReport:
         if artifact_id not in self.artifact_to_run:

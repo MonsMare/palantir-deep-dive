@@ -68,7 +68,7 @@ AI FDE Builder 包含三个相互连接但权限分离的平面：
 
 - [AI FDE 工程结构复刻项目需求与系统设计](2026-08-10-ai-fde-engineering-requirements-design.md)
 - [Palantir-like 工程公式](../../../wiki/14-Palantir-like工程公式.md)
-- [Ontology-AI 方法论实施计划](../plans/2026-08-10-ontology-ai-methodology.md)
+- [Ontology-AI 方法论实施计划](2026-08-10-ontology-ai-methodology.md)
 
 ## 2. 目标与非目标
 

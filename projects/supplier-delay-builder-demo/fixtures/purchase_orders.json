@@ -1,0 +1,25 @@
+{
+  "purchase_orders": [
+    {
+      "po_id": "PO-001",
+      "supplier": "Acme Industrial",
+      "supplier_external_key": "ACME-001",
+      "promised_date": "2026-09-01",
+      "items": [{"sku": "VALVE-100", "quantity": 20}]
+    },
+    {
+      "po_id": "PO-002",
+      "supplier": "Acme Industries",
+      "supplier_external_key": "ACME-001",
+      "promised_date": "2026-09-05",
+      "items": [{"sku": "VALVE-100", "quantity": 12}]
+    },
+    {
+      "po_id": "PO-003",
+      "supplier": "Northstar Components",
+      "supplier_external_key": "NORTHSTAR-001",
+      "promised_date": "2026-09-12",
+      "items": [{"sku": "PUMP-200", "quantity": 8}]
+    }
+  ]
+}

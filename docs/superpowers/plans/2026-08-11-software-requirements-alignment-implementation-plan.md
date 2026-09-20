@@ -2,11 +2,11 @@
 
 > For agentic workers: REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax for tracking.
 
-**Goal:** Build a simulated Ontology project that traces software requirements, change requests, delivery events, duration forecasts, feasible sprint plans, mock Actions, and feedback through the AI FDE Builder gates.
+**Goal:** Build the first Shipyard vertical slice: a simulated Ontology project that traces software requirements, change requests, delivery events, duration forecasts, feasible sprint plans, mock Actions, and feedback through the Shipyard gates.
 
-**Architecture:** Use a deterministic synthetic event generator with hidden causal truth, conformed data products, a versioned RDFS/SHACL model, time-correct analytics and features, baseline-plus-ML delivery forecasts, OR-Tools candidate plans, and a business-facing Streamlit/API surface. The project consumes the platform contracts from the AI FDE Builder plan and never writes to a real project-management system.
+**Architecture:** Use a deterministic synthetic event generator with hidden causal truth, conformed data products, a versioned RDFS/SHACL model, time-correct analytics and features, baseline-plus-ML delivery forecasts, OR-Tools candidate plans, and a sandbox/API surface consumed later by Shipyard Workbench. The project consumes Shipyard kernel contracts and never writes to a real project-management system.
 
-**Tech Stack:** Python 3.12, Pydantic v2, DuckDB, Polars, RDFLib, pySHACL, scikit-learn, OR-Tools, FastAPI, Streamlit, pytest, pandas-compatible Parquet fixtures, the AI FDE Builder Gate Engine and Action Broker.
+**Tech Stack:** Python 3.12, Pydantic v2, DuckDB, Polars, RDFLib, pySHACL, scikit-learn, OR-Tools, FastAPI, optional Streamlit sandbox views, pytest, pandas-compatible Parquet fixtures, the Shipyard Gate Engine and Action Broker.
 
 ## Global Constraints
 
@@ -829,7 +829,7 @@ Run:
     git add src/software_delivery_demo/actions.py src/software_delivery_demo/app.py tests/demo/test_actions.py tests/demo/test_endpoints.py
     git commit -m "feat: expose software delivery mock actions"
 
-## Task 10: Build the Streamlit business views and replay laboratory
+## Task 10: Build optional sandbox views and the replay laboratory
 
 **Files:**
 - Create: src/software_delivery_demo/ui.py
@@ -903,7 +903,7 @@ Run:
     git add src/software_delivery_demo/ui.py src/software_delivery_demo/app.py tests/demo/test_ui_contract.py
     git commit -m "feat: add delivery planning views and replay lab"
 
-## Task 11: Wire the project stages into AI FDE gates and run the end-to-end scenario
+## Task 11: Wire the project stages into Shipyard gates and run the end-to-end scenario
 
 **Files:**
 - Create: projects/software-delivery-demo/config/stages.yaml
@@ -1008,7 +1008,7 @@ Expected: all tests pass and compileall exits 0.
 The guide must explain how to:
   - generate the fixture;
   - run the data products;
-  - launch the API and Streamlit app;
+  - launch the API and optional sandbox view;
   - run a change impact analysis;
   - view a forecast;
   - compare plans;
